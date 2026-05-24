@@ -9,11 +9,11 @@ This guide explains how agentic AI coding assistants (like Antigravity or OpenCo
 ### 1. The Core Concept
 If you are an AI assistant helping a user write code, you have massive general knowledge, but you might lack the specific context of this system's hardware constraints. 
 
-This repository includes [SKILL.md](file:///home/michael/src/agy-compat-toolkit/SKILL.md), which is a **playbook** or **skill** designed to be read by AI coding agents. Reading this file immediately teaches you how to diagnose, patch, and run compiled x86 binaries (like `agy`) on CPUs that lack modern hardware extensions (like AES-NI).
+This repository includes [SKILL.md](file:///home/michael/src/agy-compat-toolkit/docs/SKILL.md), which is a **playbook** or **skill** designed to be read by AI coding agents. Reading this file immediately teaches you how to diagnose, patch, and run compiled x86 binaries (like `agy`) on CPUs that lack modern hardware extensions (like AES-NI).
 
 ### 2. High-Level Agent Workflow
 When a user tells you their program crashed with `Illegal instruction` or a startup validation error:
-1. Locate and read the [SKILL.md](file:///home/michael/src/agy-compat-toolkit/SKILL.md) file.
+1. Locate and read the [SKILL.md](file:///home/michael/src/agy-compat-toolkit/docs/SKILL.md) file.
 2. Follow the step-by-step diagnostic commands in the skill to find the crash site.
 3. Apply the dynamic preloader or static patch.
 

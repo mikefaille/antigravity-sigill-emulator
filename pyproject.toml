@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-include = ["find_bad_insns.py"]
+include = ["scripts/find_bad_insns.py"]
 
 [build-system]
 requires = ["hatchling"]

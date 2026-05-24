@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
 *.so
-benchmark
+run_benchmark
 *.o
 *.tar.gz

@@ -1,11 +1,11 @@
 CC = gcc
 CFLAGS = -shared -fPIC -O2 -Wall
 TARGET = sigill_emulator.so
-SRC = sigill_emulator.c
+SRC = src/sigill_emulator.c
 INSTALL_DIR = /home/michael
-VERSION ?= v1.0.7
+VERSION ?= v1.0.8
 
-RELEASE_FILES = sigill_emulator.c Makefile README.md LEARNING_GUIDE.md SKILL.md find_bad_insns.py session_log.md AGENTS.md pyproject.toml uv.lock LICENSE benchmark.c benchmark_results.md .gitignore
+RELEASE_FILES = src/sigill_emulator.c Makefile README.md docs/LEARNING_GUIDE.md docs/SKILL.md scripts/find_bad_insns.py docs/session_log.md docs/AGENTS.md pyproject.toml uv.lock LICENSE benchmark/benchmark.c docs/benchmark_results.md .gitignore
 
 .PHONY: all clean install benchmark release
 
@@ -14,8 +14,8 @@ all: $(TARGET)
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
-benchmark: benchmark.c
-	$(CC) -O2 -o benchmark benchmark.c
+benchmark: benchmark/benchmark.c
+	$(CC) -O2 -o run_benchmark benchmark/benchmark.c
 
 install: $(TARGET)
 	rm -f $(INSTALL_DIR)/$(TARGET)
@@ -26,4 +26,4 @@ release: clean all
 	@echo "[+] Packed release agy-compat-toolkit-$(VERSION).tar.gz"
 
 clean:
-	rm -f $(TARGET) benchmark
+	rm -f $(TARGET) run_benchmark
