@@ -1,97 +1,58 @@
-# Go Binary CPU Instruction Compatibility Toolkit
+# CPU Instruction Compatibility Toolkit
 
-This repository contains tools developed to enable executing high-performance compiled Go binaries (such as `agy`) targeting modern vector/cryptographic instruction sets on legacy host processors (such as Intel Xeon Westmere processors lacking AES-NI or AVX/AVX2).
+This toolkit enables high-performance binaries compiled for modern instruction sets (like `AES-NI`, `PCLMULQDQ`, and `AVX/AVX2` vector operations) to run on legacy processors (such as older Intel Xeon Westmere/Nehalem CPUs) without crashing.
 
-## Toolkit Contents
-
-1.  **`sigill_emulator.c`**: A lightweight, high-performance in-process instruction emulator. It hooks the `SIGILL` signal via `LD_PRELOAD`, decodes instructions at the crash site, emulates them in software (with self-aliasing fixes, `AESIMC` support, and async-signal-safe logging), and advances `RIP` to resume execution.
-2.  **`find_bad_insns.py`**: An optimized static analysis script built on top of `capstone` and `pyelftools` to scan `.text` segments for unsupported opcodes.
-3.  **`benchmark.c`**: A performance verification program executing 1,000,000 AESENC loops to benchmark signal trapping latency.
-4.  **`benchmark_results.md`**: Performance report logging the trapping latency (~1.63 microseconds per instruction).
-5.  **`SKILL.md`**: Operational playbook guide for diagnosing, patching, and running binaries.
-6.  **`pyproject.toml`**: Modern Python package configuration specifying tool dependencies.
-7.  **`Makefile`**: Automation script to compile, install, and run benchmarks.
+It achieves this by combining **static binary patching** (for cold validation gates) with a **dynamic in-process signal emulator** (for hot loops) preloaded via `LD_PRELOAD`.
 
 ---
 
-## Getting Started
+## 🚀 Beginner Quickstart (3-Step Guide)
 
-### 1. Prerequisites
+If you are new to computer science or systems programming, follow these 3 simple steps to get a target binary (like `agy`) running on your older CPU:
 
-Ensure compiler tools are installed:
+### Step 1: Install Compiler Prerequisites
+You need a C compiler (`gcc`) and compilation utilities (`make`) to build the project:
 ```bash
+sudo apt-get update
 sudo apt-get install build-essential gcc
 ```
 
-#### Python Environment Setup with `uv` (Recommended)
-This project supports `uv` (a fast Python package manager) to run scripts without global dependency pollution:
+### Step 2: Build and Install the Emulator
+Compile the compatibility library and install it to your user directory:
 ```bash
-# Run the scanner script instantly using uv
-uv run find_bad_insns.py <path_to_binary>
-```
-
-#### Traditional Pip Setup
-Alternatively, install packages globally or in a virtualenv:
-```bash
-python3 -m pip install --user --break-system-packages capstone pyelftools
-```
-
-### 2. Scanning for Unsupported Instructions
-
-Scan any binary (e.g. `agy.real`) to audit unsupported instructions:
-```bash
-uv run find_bad_insns.py /home/michael/.local/bin/agy.real > bad_instructions.txt
-```
-
-### 3. Compiling and Installing the Signal Emulator
-
-To build the dynamic emulator:
-```bash
+# Build the project
 make
-```
 
-To install the dynamic emulator so it's globally accessible in `/home/michael/sigill_emulator.so`:
-```bash
+# Install globally to /home/michael/sigill_emulator.so
 make install
 ```
 
-### 4. Running Benchmarks
-To compile and run the 1,000,000 iteration micro-benchmark:
+### Step 3: Run Your Program
+Execute your target program (e.g. `agy.real`) preloaded with the compatibility library:
 ```bash
-make benchmark
-LD_PRELOAD=/home/michael/sigill_emulator.so ./benchmark
+LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --help
 ```
-
-### 5. Running the Target Binary with Emulator
-To execute the binary transparently:
+*Tip: To see active emulation traces in your console, run with `DEBUG_EMU=1`:*
 ```bash
-LD_PRELOAD=/home/michael/sigill_emulator.so /home/michael/.local/bin/agy.real --help
-```
-To enable detailed emulation tracing (printing every emulated instruction, source/destination registers to stderr):
-```bash
-DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /home/michael/.local/bin/agy.real --help
+DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --help
 ```
 
 ---
 
-## Static Patching & Binary Analysis with Rizin
+## 📘 Documentation Directory
 
-For advanced inspection and static modification of target binaries, we recommend using [Rizin](https://rizin.re) (a fast, free, open-source reverse engineering framework).
+*   [SKILL.md](file:///home/michael/src/agy-compat-toolkit/SKILL.md): **The Operational Playbook**. Read this for a step-by-step diagnostic guide on tracking crashes, finding instruction offsets, and static/dynamic patching logic.
+*   [AGENTS.md](file:///home/michael/src/agy-compat-toolkit/AGENTS.md): **AI Agent Guide**. Documents how LLM coding agents (like Antigravity or OpenCode) can automatically ingest and apply the skill guide to resolve SIGILL errors.
+*   [benchmark_results.md](file:///home/michael/src/agy-compat-toolkit/benchmark_results.md): **Performance Statistics**. Shows the low-level signal trapping overhead (~1.63 microseconds per trap).
 
-### 1. Disassembling Opcode Bytes
-To inspect instruction bytes at a specific virtual address:
-```bash
-rizin -c "pd 10 @ <address>" /home/michael/.local/bin/agy.real
-```
+---
 
-### 2. Applying Surgical Patches
-Instead of writing custom scripts, you can apply static patches directly in write-mode (`-w` flag) inside Rizin:
-```bash
-# Open binary in write mode
-rizin -w /home/michael/.local/bin/agy.real
+## 🛠️ Toolkit Components
 
-# Seek to target offset and write bytes (e.g. relative jump)
-> s 0x74D0F0B
-> wx E9B300000090
-> q
-```
+*   **`sigill_emulator.c`**: Core emulator catching `SIGILL` signals, decoding register states, performing software AES/carry-less operations, and returning state.
+*   **`find_bad_insns.py`**: Static analysis instruction scanner. Runs instantly with `uv run find_bad_insns.py`.
+*   **`benchmark.c`**: Trapping test utility looping 1,000,000 AESENC traps.
+*   **`pyproject.toml`**: Modern Python dependency definition for `uv` environment isolation.
+*   **`Makefile`**: Build automator.
+*   **`session_log.md`**: Historical engineering notes on initial bypass static patching.
+*   **`LICENSE`**: zlib Open Source License.
