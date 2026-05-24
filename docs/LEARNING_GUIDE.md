@@ -117,6 +117,24 @@ When our handler returns, the OS restores the context, and the CPU resumes execu
 
 ---
 
+## 🛠️ Step-by-Step: Compiling the Emulator Shared Library
+
+Before modifying the emulator, it is crucial to understand how we compile a raw C source file into a dynamic library that can be injected via `LD_PRELOAD`.
+
+### The Compilation Command
+Run the following command in your terminal:
+```bash
+gcc -shared -fPIC -O2 -Wall -o sigill_emulator.so src/sigill_emulator.c
+```
+
+### Compiler Flags Explained:
+*   **`-shared`**: Tells the compiler to produce a shared object (`.so`) library instead of a standard executable binary (which expects a `main` function).
+*   **`-fPIC`**: Generates **Position Independent Code**. Shared libraries are loaded into arbitrary address locations in a process's memory space at runtime. `-fPIC` ensures the machine instructions use relative offsets (RIP-relative addressing) instead of absolute memory locations.
+*   **`-O2`**: Activates Level 2 optimization, which is essential to minimize signal-trapping latency.
+*   **`-Wall`**: Enables all compiler warning messages to ensure code safety.
+
+---
+
 ## 💻 Hacking Exercise 1: Add a Dummy Instruction to the Emulator
 Let's practice extending the emulator. We will register a dummy instruction that prints a greeting whenever executed, rather than crashing the program.
 
@@ -139,12 +157,41 @@ if (opcode[0] == 0x0f && opcode[1] == 0x38) {
 }
 ```
 
-### Step 2: Test It!
-Write a test program in C executing the inline assembly bytes:
+### Step 2: Create the Test Program
+Create a test file named `test_dummy.c` with the following C code:
 ```c
-__asm__ __volatile__ (".byte 0x66, 0x0f, 0x38, 0x00, 0xc0"); // triggers our handler
+#include <stdio.h>
+
+int main() {
+    printf("[*] Executing custom dummy instruction...\n");
+    
+    // Inline assembly injecting the byte sequence for our custom instruction
+    // 0x66 = Prefix, 0x0f 0x38 0x00 = Opcode, 0xc0 = ModRM byte (register-to-register)
+    __asm__ __volatile__ (
+        ".byte 0x66, 0x0f, 0x38, 0x00, 0xc0"
+    );
+    
+    printf("[*] Program execution resumed successfully!\n");
+    return 0;
+}
 ```
-Build it and run it preloaded with `sigill_emulator.so`. You will see the custom message printed to your screen instead of a crash!
+
+### Step 3: Compile and Run
+1.  **Compile the test program**:
+    ```bash
+    gcc -o test_dummy test_dummy.c
+    ```
+2.  **Execute the binary** with the emulator preloaded:
+    ```bash
+    LD_PRELOAD=./sigill_emulator.so ./test_dummy
+    ```
+3.  **Verify the Output**:
+    You will see the custom greeting from your signal handler printed directly to the terminal, and the test program will terminate cleanly:
+    ```text
+    [*] Executing custom dummy instruction...
+    [HACK] Hello from your custom CPU instruction!
+    [*] Program execution resumed successfully!
+    ```
 
 ---
 
@@ -181,14 +228,35 @@ If we want to bypass this check, we overwrite the conditional jump instruction w
     ```text
     > pd 15
     ```
-5.  **Write the Jump Patch**:
-    We want to jump past the check directly to the return instruction. If the return instruction is `0xb3` bytes ahead, we write:
-    `E9 B3 00 00 00` (`jmp +0xb3`) followed by NOP padding (`90`) to overwrite the remaining bytes of the original instruction.
+    Identify the address of the conditional check (e.g. `0x0074d110`) and the exit or success path return instruction address (e.g. `0x0074d1c9`).
+
+5.  **How to Calculate the Offset**:
+    If you want to write raw hex bytes, you need to calculate the relative offset:
+    `Offset = TargetAddress - (SourceAddress + InstructionLength)`
+    *   Target Address: `0x0074d1c9`
+    *   Source Address (Start of Jump): `0x0074d110`
+    *   Instruction Length of `jmp rel32`: `5` bytes
+    *   Calculation: `0x0074d1c9 - (0x0074d110 + 5) = 0xb4` (in hexadecimal).
+    *   This translates to opcode `E9 B4 00 00 00`.
+
+6.  **Write the Jump Patch (Option A: Write Raw Hexadecimal)**:
+    Use the `wx` command to write the hexadecimal values of `jmp +0xb4` followed by `90` (NOP) to overwrite any leftover instruction bytes:
     ```text
-    > wx e9b300000090
+    > wx e9b400000090
     ```
-6.  **Verify & Exit**:
-    Disassemble again to ensure the code now jumps straight to the exit:
+
+7.  **Write the Jump Patch (Option B: Write Assembly Directly - Recommended)**:
+    Instead of calculating offsets manually, Rizin has a built-in assembler. You can write the assembly instruction directly using the `wa` (Write Assembly) command:
+    ```text
+    > wa jmp 0x0074d1c9
+    ```
+    To overwrite the remaining bytes of the original instruction with NOPs, use:
+    ```text
+    > wa nop
+    ```
+
+8.  **Verify & Exit**:
+    Disassemble the code again to ensure the instruction has been replaced and points to the correct destination:
     ```text
     > pd 5
     > q
