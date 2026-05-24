@@ -2,47 +2,26 @@
 
 This toolkit enables high-performance binaries compiled for modern instruction sets (like `AES-NI`, `PCLMULQDQ`, and `AVX/AVX2` vector operations) to run on legacy processors (such as older Intel Xeon Westmere/Nehalem CPUs) without crashing.
 
-It is specifically designed as a zero-latency compatibility layer for the **Google Antigravity IDE** companion language server (`agy` or `language_server_linux_x64`).
+It is specifically designed as a zero-latency compatibility layer for the **Google Antigravity IDE** companion language server (`agy` or `language_server_linux_x64`). It achieves this by combining **static binary patching** (for cold validation gates) with a **dynamic in-process signal emulator** (for hot loops) preloaded via `LD_PRELOAD`.
 
 ---
 
 ## 🔍 Common Search Errors Addressed (SEO)
 
-If you are running modern compiled binaries (such as Go-based tools, `agy`, or Abseil-cpp applications) on older CPU architectures or virtualized guest operating systems, the program may crash immediately. 
+If you are executing `agy` or related binaries on an older CPU, legacy hardware, or default virtual machine cores (like Proxmox `kvm64`) and searching for solutions to these exact terminal errors:
 
-This repository provides a high-performance, dynamic compatibility layer to resolve these exact search queries and terminal error logs:
+```text
+michael@michael-MacPro5-1:~$ agy
+FATAL ERROR: This binary was compiled with aes enabled, but this feature is not available on this processor (go/sigill-fail-fast).
+Illegal instruction        (core dumped) agy
+```
 
-### ❌ Common Error Signatures
+Or any related variants:
+*   `FATAL ERROR: This binary was compiled with pclmul enabled, but this feature is not available on this processor (go/sigill-fail-fast).`
+*   `FATAL ERROR: This binary was compiled with avx enabled, but this feature is not available on this processor (go/sigill-fail-fast).`
+*   `gdb -batch -ex "run" -ex "bt" agy` -> `Program received signal SIGILL, Illegal instruction.`
 
-*   **Go Runtime Boot-Time Aborts (Go 1.18+)**:
-    ```text
-    FATAL ERROR: This binary was compiled with aes enabled, but this feature is not available on this processor (go/sigill-fail-fast).
-    ```
-    *   *Also matches*: `compiled with pclmul enabled...`
-    *   *Also matches*: `compiled with avx enabled...`
-*   **Operating System Signal Crashes**:
-    ```text
-    Illegal instruction (core dumped) agy
-    ```
-*   **Debugger Crash Dumps (GDB)**:
-    ```text
-    Program received signal SIGILL, Illegal instruction.
-    [RIP site: aesdec %xmm1, %xmm0 or pclmulqdq $0x0, %xmm1, %xmm0]
-    ```
-
-> [!NOTE]
-> **Why does this happen in Virtual Machines (Proxmox / KVM / ESXi)?**
-> If you run a virtual machine under Proxmox VE, VMware ESXi, AWS EC2, or QEMU/KVM and use the default virtual CPU type (such as `kvm64` or `qemu64` for migration compatibility), the hypervisor **hides** host CPU capabilities (like AES-NI, AVX, or PCLMULQDQ) from the guest operating system. Even if the host physical machine has a modern CPU, the binary thinks it lacks these instructions and crashes. 
-
-### 🔍 Frequently Searched Queries Handled
-*   *go/sigill-fail-fast bypass workaround*
-*   *how to run aes-ni binaries on old CPUs without AES-NI*
-*   *proxmox vm guest illegal instruction SIGILL crash*
-*   *LD_PRELOAD SIGILL CPU instruction emulator*
-*   *compile go binary without aes but use third-party libraries*
-*   *intel xeon x5650 x5670 westmere Go binary crash*
-
-This repository solves these errors transparently with **zero perceptible latency** by catching the CPU signal and emulating the math in software.
+This repository provides a high-performance, dynamic in-process emulator to bypass these hardware checks and execute the binary transparently with **zero perceptible latency**.
 
 ---
 
@@ -100,6 +79,33 @@ LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --help
 *Tip: To see active emulation traces in your console, run with `DEBUG_EMU=1`:*
 ```bash
 DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --help
+```
+
+### Step 4: Configure LD_PRELOAD Permanently (Shell Configurations)
+To avoid typing `LD_PRELOAD` before every command, you can configure it permanently in your shell profiles (for `bash`, `zsh`, or sh).
+
+#### Option A: Shell Alias (Safe, Target-Specific)
+This is the safest method because it only preloads the library when you run the specific binary. Add this to your `~/.bashrc`, `~/.zshrc`, or `~/.bash_aliases`:
+```bash
+alias agy="LD_PRELOAD=/home/michael/sigill_emulator.so /home/michael/.local/bin/agy.real"
+```
+
+#### Option B: Global Shell Export (Convenient, Multi-process)
+This automatically preloads the compatibility library for *all* processes launched by your shell. Since the emulator has practically zero overhead for compatible standard instructions, this is safe and highly convenient.
+
+Add this export statement to your shell configuration files:
+*   **For standard shells (`sh`/`bash`):** Add to `~/.profile` or `~/.bashrc`:
+    ```bash
+    export LD_PRELOAD="/home/michael/sigill_emulator.so"
+    ```
+*   **For Z-shell (`zsh`):** Add to `~/.zshrc`:
+    ```bash
+    export LD_PRELOAD="/home/michael/sigill_emulator.so"
+    ```
+
+Reload your profile to apply changes:
+```bash
+source ~/.profile  # or source ~/.bashrc / ~/.zshrc
 ```
 
 ---
