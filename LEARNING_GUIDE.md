@@ -98,9 +98,20 @@ uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
 // ... write emulated math bytes to dest ...
 ```
 
+### 3. Upgraded Concept: Register-to-Memory Address Decoding
+Not all instructions operate in register-to-register mode (`mod == 3`). In more advanced cases, instructions load and process round keys directly from read-only data segments (`.rodata`) in memory, e.g. using RIP-relative addressing:
+```text
+pclmulqdq xmm0, xmmword ptr [rip - 0x29ce8a6], 0x10
+```
+To support these memory operands, the emulator parses the **ModRM byte**, optional **SIB byte**, and **disp8/disp32 displacements** to calculate the operand's effective memory address:
+1.  **RIP-Relative:** `Effective Address = RIP_next + disp32`
+2.  **Base + Index + Scale + Disp:** `Effective Address = base_val + (index_val << scale) + disp`
+
+We fetch the corresponding register values from `uc->uc_mcontext.gregs` and retrieve the memory bytes at the computed address directly, allowing flawless emulation of memory-operand instructions.
+
 **Crucial Step**: If we return from the signal handler now, the CPU will try to execute the exact same instruction at `RIP` again, leading to an infinite crash loop. We must manually advance `RIP` in the context record past the instruction length:
 ```c
-uc->uc_mcontext.gregs[REG_RIP] += (5 + has_rex); // Advance 5 bytes (or 6 if REX is present)
+uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed; // Advance exactly by the instruction length
 ```
 When our handler returns, the OS restores the context, and the CPU resumes executing the program at the updated `RIP` address.
 

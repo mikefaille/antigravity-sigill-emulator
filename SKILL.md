@@ -111,3 +111,17 @@ Inside `sigill_emulator.c`, we hook `SIGILL` using `sigaction`. If an instructio
 1.  **SA_SIGINFO handler**: If `old_sa.sa_flags & SA_SIGINFO` is true, we call `old_sa.sa_sigaction(sig, si, ctx_void)`.
 2.  **Legacy handler**: If a standard handler was registered, we call `old_sa.sa_handler(sig)`.
 3.  **SIG_DFL (Default)**: If no handler was registered, we temporarily restore the default handler and call `kill(getpid(), SIGILL)` to allow the operating system to terminate the program and write a standard core dump.
+
+---
+
+## 🔵 Upgraded Level: Dynamic Addressing-Mode Decoding
+
+### 1. Memory Operand Support
+During code review, we discovered a RIP-relative memory operand instruction:
+```text
+0x741591c: pclmulqdq xmm0, xmmword ptr [rip - 0x29ce8a6], 0x10
+```
+Because the initial emulator only supported register-to-register operands, we upgraded `sigill_emulator.c` to include a full, robust **x86_64 addressing-mode decoder** (`resolve_mem_addr`). It parses ModRM, SIB byte scales, indices, base registers, and 8-bit/32-bit displacements to dynamically calculate effective memory addresses. 
+
+This enables the emulator to seamlessly handle both register-to-register and register-to-memory SSE instructions at runtime, ensuring that no `pclmulqdq` instruction with memory operands triggers a crash.
+

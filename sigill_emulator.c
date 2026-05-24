@@ -228,6 +228,85 @@ static void log_emu_pclmul(uint8_t dest, uint8_t src, uint8_t imm) {
     (void)rc;
 }
 
+static uint64_t get_register_val(ucontext_t *uc, int reg_idx) {
+    static const int reg_map[16] = {
+        REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+        REG_R8,  REG_R9,  REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15
+    };
+    return uc->uc_mcontext.gregs[reg_map[reg_idx]];
+}
+
+static uint8_t *resolve_mem_addr(ucontext_t *uc, uint8_t *rip, int has_rex, uint8_t rex, uint8_t modrm, int *bytes_consumed) {
+    uint8_t mod = modrm >> 6;
+    uint8_t rm = modrm & 7;
+    uint8_t *ptr = rip + 1 + has_rex + 3; // pointing to ModRM + 1 (SIB or Displacement or Imm)
+    
+    uint64_t base_val = 0;
+    uint64_t index_val = 0;
+    int scale = 0;
+    int32_t disp = 0;
+    
+    if (mod == 0 && rm == 5) {
+        // RIP-relative addressing
+        int32_t disp32;
+        memcpy(&disp32, ptr, 4);
+        ptr += 4;
+        int has_imm = (rip[1+has_rex+1] == 0x3a);
+        uint8_t *rip_next = ptr + (has_imm ? 1 : 0);
+        *bytes_consumed = (rip_next - rip);
+        return rip_next + disp32;
+    }
+    
+    if (rm == 4) {
+        uint8_t sib = *ptr++;
+        uint8_t ss = sib >> 6;
+        uint8_t index = (sib >> 3) & 7;
+        uint8_t base = sib & 7;
+        
+        uint8_t base_reg = base;
+        if (has_rex && (rex & 1)) base_reg += 8;
+        
+        uint8_t index_reg = index;
+        if (has_rex && (rex & 2)) index_reg += 8;
+        
+        if (base == 5 && mod == 0) {
+            int32_t disp32;
+            memcpy(&disp32, ptr, 4);
+            ptr += 4;
+            disp = disp32;
+        } else {
+            base_val = get_register_val(uc, base_reg);
+        }
+        
+        if (index != 4) {
+            index_val = get_register_val(uc, index_reg);
+            scale = ss;
+        }
+    } else {
+        uint8_t base_reg = rm;
+        if (has_rex && (rex & 1)) base_reg += 8;
+        base_val = get_register_val(uc, base_reg);
+    }
+    
+    if (mod == 1) {
+        int8_t disp8 = (int8_t)*ptr++;
+        disp += disp8;
+    } else if (mod == 2) {
+        int32_t disp32;
+        memcpy(&disp32, ptr, 4);
+        ptr += 4;
+        disp += disp32;
+    }
+    
+    int has_imm = (rip[1+has_rex+1] == 0x3a);
+    if (has_imm) {
+        ptr++;
+    }
+    
+    *bytes_consumed = (ptr - rip);
+    return (uint8_t *)(base_val + (index_val << scale) + disp);
+}
+
 static void handler(int sig, siginfo_t *si, void *ctx_void) {
     ucontext_t *uc = (ucontext_t *)ctx_void;
     if (!uc->uc_mcontext.fpregs) {
@@ -249,16 +328,15 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
         if (opcode[0] == 0x0f && opcode[1] == 0x38 && (opcode[2] == 0xde || opcode[2] == 0xdf || opcode[2] == 0xdb || opcode[2] == 0xdc || opcode[2] == 0xdd)) {
             uint8_t op_type = opcode[2];
             uint8_t modrm = opcode[3];
+            uint8_t reg_idx = (modrm >> 3) & 7;
+            if (has_rex) {
+                if (rex & 4) reg_idx += 8;
+            }
+            uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
             
             if ((modrm >> 6) == 3) {
-                uint8_t reg_idx = (modrm >> 3) & 7;
                 uint8_t rm_idx = modrm & 7;
-                if (has_rex) {
-                    if (rex & 4) reg_idx += 8;
-                    if (rex & 1) rm_idx += 8;
-                }
-                
-                uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
+                if (has_rex && (rex & 1)) rm_idx += 8;
                 uint8_t *src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[rm_idx];
                 
                 if (debug_emu) {
@@ -273,20 +351,36 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 
                 uc->uc_mcontext.gregs[REG_RIP] += (5 + has_rex);
                 return;
+            } else {
+                int bytes_consumed = 0;
+                uint8_t *src = resolve_mem_addr(uc, rip, has_rex, rex, modrm, &bytes_consumed);
+                
+                if (debug_emu) {
+                    log_emu_aes(op_type, reg_idx, 99); // 99 indicates memory operand
+                }
+                
+                if (op_type == 0xde) emulate_aesdec(dest, src);
+                else if (op_type == 0xdf) emulate_aesdeclast(dest, src);
+                else if (op_type == 0xdb) emulate_aesimc(dest, src);
+                else if (op_type == 0xdc) emulate_aesenc(dest, src);
+                else if (op_type == 0xdd) emulate_aesenclast(dest, src);
+                
+                uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
+                return;
             }
         } else if (opcode[0] == 0x0f && opcode[1] == 0x3a && opcode[2] == 0x44) {
             uint8_t modrm = opcode[3];
-            uint8_t imm = opcode[4];
+            uint8_t reg_idx = (modrm >> 3) & 7;
+            if (has_rex) {
+                if (rex & 4) reg_idx += 8;
+            }
+            uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
             
             if ((modrm >> 6) == 3) {
-                uint8_t reg_idx = (modrm >> 3) & 7;
+                uint8_t imm = opcode[4];
                 uint8_t rm_idx = modrm & 7;
-                if (has_rex) {
-                    if (rex & 4) reg_idx += 8;
-                    if (rex & 1) rm_idx += 8;
-                }
+                if (has_rex && (rex & 1)) rm_idx += 8;
                 
-                uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
                 uint8_t *src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[rm_idx];
                 
                 if (debug_emu) {
@@ -296,6 +390,19 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 emulate_pclmulqdq(dest, src, imm);
                 
                 uc->uc_mcontext.gregs[REG_RIP] += (6 + has_rex);
+                return;
+            } else {
+                int bytes_consumed = 0;
+                uint8_t *src = resolve_mem_addr(uc, rip, has_rex, rex, modrm, &bytes_consumed);
+                uint8_t imm = rip[bytes_consumed - 1];
+                
+                if (debug_emu) {
+                    log_emu_pclmul(reg_idx, 99, imm);
+                }
+                
+                emulate_pclmulqdq(dest, src, imm);
+                
+                uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
                 return;
             }
         }
