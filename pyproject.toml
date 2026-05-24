@@ -1,0 +1,17 @@
+[project]
+name = "agy-compat-toolkit"
+version = "1.0.1"
+description = "Tools to run high-performance compiled Go/C++ binaries on legacy CPUs without AES-NI/PCLMULQDQ"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "capstone>=4.0.2",
+    "pyelftools>=0.29",
+]
+
+[tool.hatch.build.targets.wheel]
+include = ["find_bad_insns.py"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

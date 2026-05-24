@@ -4,9 +4,13 @@ This repository contains tools developed to enable executing high-performance co
 
 ## Toolkit Contents
 
-1.  **`find_bad_insns.py`**: An optimized static analysis script built on top of `capstone` and `pyelftools`. It scans the binary `.text` segment in small chunks to prevent OOM and prints all instances of unsupported or suspect instructions (e.g. `aesdec`, `aesenc`, `pclmulqdq`, and AVX/AVX2 vector instructions) alongside their file offsets, virtual addresses, mnemonics, and raw bytes.
-2.  **`sigill_emulator.c`**: A lightweight, high-performance in-process instruction emulator. It hooks the `SIGILL` signal via `LD_PRELOAD`, decodes the instruction bytes at the crash site (`RIP`), decodes standard and extended (`REX.R`/`REX.B`) register operands, emulates the instruction in software, updates the register states inside the thread context (`ucontext_t`), and transparently advances `RIP` to resume seamless native execution.
-3.  **`Makefile`**: Standard build script to automate compiling and installing the emulator shared library.
+1.  **`sigill_emulator.c`**: A lightweight, high-performance in-process instruction emulator. It hooks the `SIGILL` signal via `LD_PRELOAD`, decodes instructions at the crash site, emulates them in software (with self-aliasing fixes, `AESIMC` support, and async-signal-safe logging), and advances `RIP` to resume execution.
+2.  **`find_bad_insns.py`**: An optimized static analysis script built on top of `capstone` and `pyelftools` to scan `.text` segments for unsupported opcodes.
+3.  **`benchmark.c`**: A performance verification program executing 1,000,000 AESENC loops to benchmark signal trapping latency.
+4.  **`benchmark_results.md`**: Performance report logging the trapping latency (~1.63 microseconds per instruction).
+5.  **`SKILL.md`**: Operational playbook guide for diagnosing, patching, and running binaries.
+6.  **`pyproject.toml`**: Modern Python package configuration specifying tool dependencies.
+7.  **`Makefile`**: Automation script to compile, install, and run benchmarks.
 
 ---
 
@@ -14,61 +18,80 @@ This repository contains tools developed to enable executing high-performance co
 
 ### 1. Prerequisites
 
-Ensure Python dependencies and compilers are installed:
+Ensure compiler tools are installed:
+```bash
+sudo apt-get install build-essential gcc
+```
 
+#### Python Environment Setup with `uv` (Recommended)
+This project supports `uv` (a fast Python package manager) to run scripts without global dependency pollution:
+```bash
+# Run the scanner script instantly using uv
+uv run find_bad_insns.py <path_to_binary>
+```
+
+#### Traditional Pip Setup
+Alternatively, install packages globally or in a virtualenv:
 ```bash
 python3 -m pip install --user --break-system-packages capstone pyelftools
-sudo apt-get install build-essential gcc
 ```
 
 ### 2. Scanning for Unsupported Instructions
 
-To scan any binary (e.g., `agy`) and generate a census of unsupported instructions, use the scanner:
-
+Scan any binary (e.g. `agy.real`) to audit unsupported instructions:
 ```bash
-./find_bad_insns.py /home/michael/.local/bin/agy.real > /tmp/bad_instructions.txt
+uv run find_bad_insns.py /home/michael/.local/bin/agy.real > bad_instructions.txt
 ```
 
 ### 3. Compiling and Installing the Signal Emulator
 
 To build the dynamic emulator:
-
 ```bash
 make
 ```
 
 To install the dynamic emulator so it's globally accessible in `/home/michael/sigill_emulator.so`:
-
 ```bash
 make install
 ```
 
-### 4. Running the Binary with Emulator
+### 4. Running Benchmarks
+To compile and run the 1,000,000 iteration micro-benchmark:
+```bash
+make benchmark
+LD_PRELOAD=/home/michael/sigill_emulator.so ./benchmark
+```
 
-To execute the binary transparently through the emulator (capturing signals on the fly):
-
+### 5. Running the Target Binary with Emulator
+To execute the binary transparently:
 ```bash
 LD_PRELOAD=/home/michael/sigill_emulator.so /home/michael/.local/bin/agy.real --help
 ```
-
-To enable detailed emulation tracing (printing every emulated instruction, source/destination registers, and immediates to stderr):
-
+To enable detailed emulation tracing (printing every emulated instruction, source/destination registers to stderr):
 ```bash
 DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /home/michael/.local/bin/agy.real --help
 ```
 
 ---
 
-## Technical Details
+## Static Patching & Binary Analysis with Rizin
 
-### AES-NI Emulation Semantics
+For advanced inspection and static modification of target binaries, we recommend using [Rizin](https://rizin.re) (a fast, free, open-source reverse engineering framework).
 
-The emulator handles the following AES-NI instructions:
-*   `AESDEC`: Inverse ShiftRows -> Inverse SubBytes -> Inverse MixColumns -> XOR with Round Key.
-*   `AESDECLAST`: Inverse ShiftRows -> Inverse SubBytes -> XOR with Round Key.
-*   `AESENC`: ShiftRows -> SubBytes -> MixColumns -> XOR with Round Key.
-*   `AESENCLAST`: ShiftRows -> SubBytes -> XOR with Round Key.
+### 1. Disassembling Opcode Bytes
+To inspect instruction bytes at a specific virtual address:
+```bash
+rizin -c "pd 10 @ <address>" /home/michael/.local/bin/agy.real
+```
 
-### Carry-less Multiplication Semantics
+### 2. Applying Surgical Patches
+Instead of writing custom scripts, you can apply static patches directly in write-mode (`-w` flag) inside Rizin:
+```bash
+# Open binary in write mode
+rizin -w /home/michael/.local/bin/agy.real
 
-*   `PCLMULQDQ`: Performs Carry-less Multiplication (polynomial multiplication over GF(2)) on selected 64-bit halves (determined by the immediate byte `imm`) of two 128-bit XMM registers, writing the 128-bit result back to the destination register.
+# Seek to target offset and write bytes (e.g. relative jump)
+> s 0x74D0F0B
+> wx E9B300000090
+> q
+```

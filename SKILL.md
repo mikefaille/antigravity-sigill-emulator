@@ -40,21 +40,47 @@ Under GDB, identify the program counter (`$pc` or `RIP`) at the crash site. Quer
     `file_offset = crash_address - base_load_address`
 
 ### Step 2.3: Disassemble and Verify Instruction Bytes
-Using the calculated `file_offset`, disassemble the surrounding instructions in Python using the `capstone` library to verify the crashing opcode:
 
-```python
+#### Option A: Using Rizin (Recommended)
+You can directly disassemble instruction bytes at a specific crash address using `rizin`:
+```bash
+rizin -c "pd 10 @ <crash_address>" /path/to/binary
+```
+
+#### Option B: Using Capstone (Python)
+Using `uv run`, you can run the capstone disassembler instantly without globally installing packages:
+```bash
+uv run python3 -c '
 from capstone import *
+import sys
 with open("/path/to/binary", "rb") as f:
-    f.seek(file_offset)
+    f.seek(<file_offset>)
     code = f.read(32)
 md = Cs(CS_ARCH_X86, CS_MODE_64)
-for insn in md.disasm(code, crash_address):
+for insn in md.disasm(code, <crash_address>):
     print(f"0x{insn.address:x}: {insn.mnemonic:10} {insn.op_str} bytes={insn.bytes.hex()}")
+'
 ```
 
 ---
 
-## 3. Emulation Workflow (Track B)
+## 3. Emulation vs. Static Patching
+
+Depending on where the instruction resides, choose the appropriate workflow:
+
+### Track A: Static Patching (for cold initialization checks)
+If the instruction triggers during initialization (e.g. Go CPUID runtime check) and is only run once, you can statically patch the binary using `rizin` in write mode (`-w`):
+```bash
+# Open the binary in write-mode
+rizin -w /path/to/binary
+
+# Seek to target offset and write patch (e.g. direct relative jump E9 B3 00 00 00 + NOP 90)
+> s <patch_offset>
+> wx e9b300000090
+> q
+```
+
+### Track B: Signal Emulation (for hot loop execution)
 
 If the binary contains compiled instructions (such as `aesdec`, `aesenc`, or `pclmulqdq`) executed on runtime hotpaths, static patching of instructions is unsafe. Instead, use the **LD_PRELOAD signal emulation layer** located at `~/src/agy-compat-toolkit`.
 

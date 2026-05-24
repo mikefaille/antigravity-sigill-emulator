@@ -1,0 +1,74 @@
+version = 1
+revision = 3
+requires-python = ">=3.8"
+resolution-markers = [
+    "python_full_version >= '3.10'",
+    "python_full_version == '3.9.*'",
+    "python_full_version < '3.9'",
+]
+
+[[package]]
+name = "agy-compat-toolkit"
+version = "1.0.1"
+source = { editable = "." }
+dependencies = [
+    { name = "capstone" },
+    { name = "pyelftools" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "capstone", specifier = ">=4.0.2" },
+    { name = "pyelftools", specifier = ">=0.29" },
+]
+
+[[package]]
+name = "capstone"
+version = "5.0.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "importlib-resources", marker = "python_full_version < '3.9'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f8/64/7222574999dbfe1ecf2cbe63b7acb3521ae390f2ad377df8a6846ead029d/capstone-5.0.8.tar.gz", hash = "sha256:6dd5d56011533b8452325d3aa586ba3788ecbf843fc976ec6ae2833c86481e72", size = 2947140, upload-time = "2026-05-23T18:15:29.924Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/09/0e/43263061b2cc9af157d74a2b01cd4cf45f2d58016ebc4d9ecf6f58e9ec2e/capstone-5.0.8-py3-none-macosx_10_9_universal2.whl", hash = "sha256:57a9f20b70707a60e85de440e58abc62547721c825532d5a4d68120b01cf15ec", size = 2195116, upload-time = "2026-05-23T18:15:14.685Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/e7/7efc904a90456e158199626e36f093364a8be7ab33e49c3bc20566a014ca/capstone-5.0.8-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:6fedb8ac772e0d72535aa7b01f3168f9322eae9dfc6f2a7ff4a3df4b56abe4bd", size = 1190140, upload-time = "2026-05-23T18:15:16.631Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/d9/ffb98a26c8ba00fb60fc22e8fc15ccfac654ffdad2289b3704aa97b60c75/capstone-5.0.8-py3-none-macosx_11_0_arm64.whl", hash = "sha256:9fa96a5587f24611f555e3a149d730f641041de9d18bc539b6a8195773573e3c", size = 1202108, upload-time = "2026-05-23T18:15:18.354Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/3e/e217ae556d4227ffeeebf1ee4e17173a947a08fd5b22c2236a6a4e452807/capstone-5.0.8-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f8d985bc3eab4fd2326f57990689aef1e8d2d85f231e2ca1922e5092838d289b", size = 1460746, upload-time = "2026-05-23T18:15:19.692Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/58/ff5cff6793b5b4521fda5ffbb490b5c4462d74c11ddc72eedd7d84a48f0b/capstone-5.0.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:22a625dc5c508dcfb558ee9def1d60627c7ca7e03c5d7848706dfc995e0340a9", size = 1484935, upload-time = "2026-05-23T18:15:20.867Z" },
+    { url = "https://files.pythonhosted.org/packages/03/41/2e48aaa8dc7c6a203780e270d69fae64950a87fbbf82398419bab9edb6dd/capstone-5.0.8-py3-none-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:5cbfca6354d2737aee83a274c8f3a60b8719ef8ee086264d06cbf400ad34364c", size = 1483023, upload-time = "2026-05-23T18:15:22.481Z" },
+    { url = "https://files.pythonhosted.org/packages/48/b6/e032471dcaf0179be6a2e01e9ee1ac37b3b05768a74ab34733472ed373ad/capstone-5.0.8-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:da722aed323b39439ba4358c663617df6d4d9b0cf9d5f8b10a9defb45fd224d0", size = 1458941, upload-time = "2026-05-23T18:15:23.82Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/91/a00fa588911e357a962ec0dce931e9ee5eb1701ed8d6d7cd1eb299a72b71/capstone-5.0.8-py3-none-musllinux_1_2_i686.whl", hash = "sha256:2442b98677cbc3dbc15755204147a9e8fa6be5bfd916aebd73461833a75cc27f", size = 1488084, upload-time = "2026-05-23T18:15:25.255Z" },
+    { url = "https://files.pythonhosted.org/packages/71/e5/d2f424f3e7008a518d29b2c784b228169816d0556a9233d2b0657c94c465/capstone-5.0.8-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:21cc6bc86ec6b9cb69e3b7185cb0292ec8e93930c2f67aa904d3a5bda59cfb0d", size = 1488645, upload-time = "2026-05-23T18:15:26.577Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/51/6cd73b489040a84420844ea14db8436ec64a3f01b981d9914c5391e6168b/capstone-5.0.8-py3-none-win_amd64.whl", hash = "sha256:49dd7969a6e4245f284b51a1f9247d79335125a2fa7f10a4b924c5d7ddebda53", size = 1273257, upload-time = "2026-05-23T18:15:28.182Z" },
+]
+
+[[package]]
+name = "importlib-resources"
+version = "6.4.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "zipp", marker = "python_full_version < '3.9'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/98/be/f3e8c6081b684f176b761e6a2fef02a0be939740ed6f54109a2951d806f3/importlib_resources-6.4.5.tar.gz", hash = "sha256:980862a1d16c9e147a59603677fa2aa5fd82b87f223b6cb870695bcfce830065", size = 43372, upload-time = "2024-09-09T17:03:14.677Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/6a/4604f9ae2fa62ef47b9de2fa5ad599589d28c9fd1d335f32759813dfa91e/importlib_resources-6.4.5-py3-none-any.whl", hash = "sha256:ac29d5f956f01d5e4bb63102a5a19957f1b9175e45649977264a1416783bb717", size = 36115, upload-time = "2024-09-09T17:03:13.39Z" },
+]
+
+[[package]]
+name = "pyelftools"
+version = "0.32"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b9/ab/33968940b2deb3d92f5b146bc6d4009a5f95d1d06c148ea2f9ee965071af/pyelftools-0.32.tar.gz", hash = "sha256:6de90ee7b8263e740c8715a925382d4099b354f29ac48ea40d840cf7aa14ace5", size = 15047199, upload-time = "2025-02-19T14:20:05.549Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/43/700932c4f0638c3421177144a2e86448c0d75dbaee2c7936bda3f9fd0878/pyelftools-0.32-py3-none-any.whl", hash = "sha256:013df952a006db5e138b1edf6d8a68ecc50630adbd0d83a2d41e7f846163d738", size = 188525, upload-time = "2025-02-19T14:19:59.919Z" },
+]
+
+[[package]]
+name = "zipp"
+version = "3.20.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/bf/5c0000c44ebc80123ecbdddba1f5dcd94a5ada602a9c225d84b5aaa55e86/zipp-3.20.2.tar.gz", hash = "sha256:bc9eb26f4506fda01b81bcde0ca78103b6e62f991b381fec825435c836edbc29", size = 24199, upload-time = "2024-09-13T13:44:16.101Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/8b/5ba542fa83c90e09eac972fc9baca7a88e7e7ca4b221a89251954019308b/zipp-3.20.2-py3-none-any.whl", hash = "sha256:a817ac80d6cf4b23bf7f2828b7cabf326f15a001bea8b1f9b49631780ba28350", size = 9200, upload-time = "2024-09-13T13:44:14.38Z" },
+]
