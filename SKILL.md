@@ -69,16 +69,38 @@ for insn in md.disasm(code, <crash_address>):
 Depending on where the instruction resides, choose the appropriate workflow:
 
 ### Track A: Static Patching (for cold initialization checks)
-If the instruction triggers during initialization (e.g. Go CPUID runtime check) and is only run once, you can statically patch the binary using `rizin` in write mode (`-w`):
-```bash
-# Open the binary in write-mode
-rizin -w /path/to/binary
+If the instruction triggers during initialization (e.g. Go CPUID runtime check) and is only run once, you can statically patch the binary using `rizin` in write mode (`-w`).
 
-# Seek to target offset and write patch (e.g. direct relative jump E9 B3 00 00 00 + NOP 90)
-> s <patch_offset>
-> wx e9b300000090
-> q
-```
+#### Handling Address Shuffles in Updates (Automated Patch Finding)
+When `agy` is updated, the compiler will shuffle addresses, and the hardcoded patch offset will change. Use one of these methods to find the new patch location:
+
+1. **Symbol Lookup (Non-Stripped Binaries):**
+   Open the binary in `rizin` and find the symbols:
+   ```bash
+   rizin /path/to/binary
+   > is ~cpu.Initialize
+   ```
+   Seek directly to the symbol location and apply the bypass patch.
+
+2. **String XREF Lookup (Stripped Binaries):**
+   Search for the unique error string to find the validation function:
+   ```bash
+   # Open binary in write mode
+   rizin -w /path/to/binary
+
+   # Search for the target error string
+   > / FATAL ERROR: This binary was compiled with aes enabled
+
+   # Find cross-references (XREFs) to the string address found (e.g. 0x08123450)
+   > axt 0x08123450
+
+   # Seek to the instruction referencing it (the check block caller)
+   > s <address_of_caller>
+
+   # Apply the relative jump bypass patch at the beginning of the check block
+   > wx e9b300000090
+   > q
+   ```
 
 ### Track B: Signal Emulation (for hot loop execution)
 
