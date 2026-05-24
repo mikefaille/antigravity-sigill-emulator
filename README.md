@@ -112,10 +112,10 @@ source ~/.profile  # or source ~/.bashrc / ~/.zshrc
 
 ## 📘 Documentation Directory
 
-*   [LEARNING_GUIDE.md](file:///home/michael/src/agy-compat-toolkit/docs/LEARNING_GUIDE.md): **Learning Guide**. A comprehensive, step-by-step systems programming tutorial explaining hooks, signals, register manipulations, and manual patching without AI.
-*   [SKILL.md](file:///home/michael/src/agy-compat-toolkit/docs/SKILL.md): **The Operational Playbook**. Read this for a step-by-step diagnostic guide on tracking crashes, finding instruction offsets, and static/dynamic patching logic.
-*   [AGENTS.md](file:///home/michael/src/agy-compat-toolkit/docs/AGENTS.md): **AI Agent Guide**. Documents how LLM coding agents (like Antigravity or OpenCode) can automatically ingest and apply the skill guide to resolve SIGILL errors.
-*   [benchmark_results.md](file:///home/michael/src/agy-compat-toolkit/docs/benchmark_results.md): **Performance Statistics**. Shows the low-level signal trapping overhead (~1.63 microseconds per trap).
+*   [LEARNING_GUIDE.md](./docs/LEARNING_GUIDE.md): **Learning Guide**. A comprehensive, step-by-step systems programming tutorial explaining hooks, signals, register manipulations, and manual patching without AI.
+*   [SKILL.md](./docs/SKILL.md): **The Operational Playbook**. Read this for a step-by-step diagnostic guide on tracking crashes, finding instruction offsets, and static/dynamic patching logic.
+*   [AGENTS.md](./docs/AGENTS.md): **AI Agent Guide**. Documents how LLM coding agents (like Antigravity or OpenCode) can automatically ingest and apply the skill guide to resolve SIGILL errors.
+*   [benchmark_results.md](./docs/benchmark_results.md): **Performance Statistics**. Shows the low-level signal trapping overhead (~1.63 microseconds per trap).
 
 ---
 

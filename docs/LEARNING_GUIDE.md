@@ -49,7 +49,7 @@ When you run a program in Linux (like `./bin`), the operating system loads the e
 ### The Hook: `LD_PRELOAD`
 `LD_PRELOAD` is an environment variable that tells the dynamic linker: *"Load this specific library first, before any other libraries, and override any matching symbols."*
 
-In [sigill_emulator.c](file:///home/michael/src/agy-compat-toolkit/src/sigill_emulator.c), we define a constructor:
+In [sigill_emulator.c](../src/sigill_emulator.c), we define a constructor:
 ```c
 __attribute__((constructor))
 static void init(void) {
@@ -123,7 +123,7 @@ Let's practice extending the emulator. We will register a dummy instruction that
 We will use the byte sequence `0x0F 0x38 0x00` (which is unassigned or triggers SIGILL on most CPUs) as our dummy instruction.
 
 ### Step 1: Modify the Signal Handler
-Open [sigill_emulator.c](file:///home/michael/src/agy-compat-toolkit/src/sigill_emulator.c) and find the opcode decoding block in the `handler` function. Add a check for `0x00` under the `0x0f 0x38` prefix:
+Open [sigill_emulator.c](../src/sigill_emulator.c) and find the opcode decoding block in the `handler` function. Add a check for `0x00` under the `0x0f 0x38` prefix:
 
 ```c
 // Inside handler() in sigill_emulator.c:

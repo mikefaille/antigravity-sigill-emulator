@@ -22,7 +22,7 @@ Because translation happens at the hardware/operating system boundary, it takes 
 
 ## 🟡 Developer Level: Benchmark Setup and Comparison
 
-To verify that the emulator works under load and measure its latency, we use a test utility named [benchmark.c](file:///home/michael/src/agy-compat-toolkit/benchmark/benchmark.c). This program runs a loop of **1,000,000** unsupported `aesenc` instructions.
+To verify that the emulator works under load and measure its latency, we use a test utility named [benchmark.c](../benchmark/benchmark.c). This program runs a loop of **1,000,000** unsupported `aesenc` instructions.
 
 ### 1. Baseline Test (Without Emulator)
 Running the benchmark directly on the host CPU without loading the emulator:
