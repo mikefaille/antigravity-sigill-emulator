@@ -41,6 +41,7 @@ DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --h
 
 ## 📘 Documentation Directory
 
+*   [LEARNING_GUIDE.md](file:///home/michael/src/agy-compat-toolkit/LEARNING_GUIDE.md): **Learning Guide**. A comprehensive, step-by-step systems programming tutorial explaining hooks, signals, register manipulations, and manual patching without AI.
 *   [SKILL.md](file:///home/michael/src/agy-compat-toolkit/SKILL.md): **The Operational Playbook**. Read this for a step-by-step diagnostic guide on tracking crashes, finding instruction offsets, and static/dynamic patching logic.
 *   [AGENTS.md](file:///home/michael/src/agy-compat-toolkit/AGENTS.md): **AI Agent Guide**. Documents how LLM coding agents (like Antigravity or OpenCode) can automatically ingest and apply the skill guide to resolve SIGILL errors.
 *   [benchmark_results.md](file:///home/michael/src/agy-compat-toolkit/benchmark_results.md): **Performance Statistics**. Shows the low-level signal trapping overhead (~1.63 microseconds per trap).
@@ -52,6 +53,7 @@ DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --h
 *   **`sigill_emulator.c`**: Core emulator catching `SIGILL` signals, decoding register states, performing software AES/carry-less operations, and returning state.
 *   **`find_bad_insns.py`**: Static analysis instruction scanner. Runs instantly with `uv run find_bad_insns.py`.
 *   **`benchmark.c`**: Trapping test utility looping 1,000,000 AESENC traps.
+*   **`LEARNING_GUIDE.md`**: Systems programming educational guide detailing dynamic hooking, signal trapping, and manual binary hacking.
 *   **`pyproject.toml`**: Modern Python dependency definition for `uv` environment isolation.
 *   **`Makefile`**: Build automator.
 *   **`session_log.md`**: Historical engineering notes on initial bypass static patching.
