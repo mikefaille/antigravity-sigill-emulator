@@ -1,89 +1,77 @@
-# Compatibility Engineering Session Log: Bypassing Go/C++ Hardware Restrictions in agy
+# Compatibility Engineering Session Log
 
-**Date:** Sun May 24 2026  
-**Host Environment:** linux / `michael-MacPro5-1`  
-**Target Binary:** `agy` (statically/dynamically linked Go/C++ executable)  
-**Host CPU Limitation:** Lack of AES-NI, AVX, AVX2, AVX-512, and PCLMULQDQ instructions  
+This document records the original engineering session debugging the `agy` start-up crashes and implementing the dynamic signal emulator. It is structured from high-level concepts to low-level engineering bytes.
 
 ---
 
-## 1. Initial State and Problem Definition
+## 🟢 Novice Level: Why Did It Crash and How Did We Solve It?
 
-When executing `/home/michael/.local/bin/agy`, it immediately terminated prior to application-level startup with the following fatal runtime error:
+### 1. The Startup Failure
+When running the `agy` tool, the program crashed immediately on start with the error:
 ```text
 FATAL ERROR: This binary was compiled with aes enabled, but this feature is not available on this processor (go/sigill-fail-fast).
-Illegal instruction        (core dumped) agy
+Illegal instruction (core dumped)
 ```
 
-### Analysis of Go/C++ Feature Checks
-Investigation showed two distinct levels of instruction set enforcement:
-1.  **Early Go Runtime Validation:** A validation function inside Go's `internal/cpu` initialization package scans compilation options. If a compile-time mandated instruction set (e.g. `aes`) is absent from the host CPU (evaluated via CPUID), a fast-fail crash is executed by writing a fatal error to `stderr` and raising `SIGILL`.
-2.  **Unconditional Inlined Assembly:** Inside the compiled `.text` section, high-performance cryptographic operations and map hash calculations (using `absl::Hash` from compiled Abseil-cpp dependencies) execute raw `aesdec`, `aesenc`, and vector instructions directly, without runtime gating.
+### 2. Why Did This Happen?
+This error is caused by a double safety check inside `agy`:
+1. **The Gatekeeper Check (Initialization)**: When the program starts, Go's runtime queries the CPU's flags. If it sees that the CPU is old and lacks cryptographic acceleration (like AES-NI), it writes a fatal error to the terminal and shuts down.
+2. **The Actual Work (Hot Loops)**: If we bypass that gatekeeper check, the program runs, but eventually executes raw cryptographic or hashing instructions. If the CPU hits these instructions, it triggers a hardware crash (`Illegal Instruction`).
+
+### 3. The Dual Solution
+To get `agy` working without crashes, we applied a **dual solution**:
+* **Static Bypass**: We modified a few bytes in the binary's gatekeeper code. This makes the program skip the initial feature check, allowing the startup code to run.
+* **Dynamic Emulation**: We created a shared library that runs alongside the program. Whenever the program executes a raw cryptographic instruction, the library catches the signal, performs the math in software, and lets the program proceed.
 
 ---
 
-## 2. Diagnostics and Mapping
+## 🟡 Developer Level: Diagnostics and Code Offsets
 
-### Finding Section Headers and File Offsets
-We ran `readelf -S /home/michael/.local/bin/agy` to obtain section mapping details:
-*   `.text` section starts at `Address 0x04b13000`, size `0x02a57a10`, and file offset `0x04b13000`.
+To apply the static bypass and compile the emulator, we mapped the binary structure:
 
-### Calculating the Crash Address Offset
-Using GDB on the crashing binary showed that a `SIGILL` occurred at `0x000055555c467efe`:
-```text
-=> 0x55555c467efe: aesdec %xmm1,%xmm0
-```
-Calculating relative file offset:
-*   GDB base load address: `0x0000555555400000`
-*   Instruction Address: `0x000055555c467efe`
-*   `file_offset = 0x55555c467efe - 0x555555400000 = 0x7067efe`
+### 1. Locating the Code Section (.text)
+We ran `readelf` on the binary to find where the executable machine code lies:
+* Command: `readelf -S /home/michael/.local/bin/agy`
+* Result: `.text` section starts at address `0x04b13000` with file offset `0x04b13000`.
 
-Disassembly of bytes at offset `0x7067efe` verified the exact instruction as:
-`66 0f 38 de c1` -> `aesdec xmm0, xmm1`
+### 2. Identifying the Crash Address
+We executed the binary under GDB to capture the instruction address where the `SIGILL` occurs:
+* Crashed at: `0x000055555c467efe`
+* Instruction: `aesdec %xmm1,%xmm0`
 
----
-
-## 3. Engineering the Resolution
-
-The resolution was implemented using a dual approach: a precise Go-runtime patch to bypass the early validation check, combined with an LD_PRELOAD signal emulation layer to handle raw hardware instructions in software.
-
-### Phase 3.1: Bypassing early Go Runtime Checks (The Static Patch)
-We located the Go validation function at physical file offset `0x74D0F00`:
-*   At offset `0x74D0F06`: `E8 D5 3D 09 00` (`call cpu.Initialize`).
-*   At offset `0x74D0F0B`: `8B 05 FF 0F 4A 02` (`mov 0x24a0fff(%rip), %eax`).
-We applied a surgical static patch starting at offset `0x74D0F0B` to insert a direct relative jump (`E9 B3 00 00 00` + NOP padding `90`) targeting the return block at `0x74D0FC3` (`add $0x8, %rsp; pop %rbx; pop %rbp; ret`).
-This bypasses early Required checks while still allowing `cpu.Initialize` to correctly set `cpu.X86.HasAES = false`.
-
-### Phase 3.2: Dynamic Signal Emulation (The LD_PRELOAD Layer)
-To emulate unsupported AES-NI and PCLMULQDQ instructions dynamically, we implemented `/home/michael/src/agy-compat-toolkit/sigill_emulator.c`. 
-
-It intercepts the `SIGILL` signal and emulates:
-1.  **`aesdec`** and **`aesdeclast`** (using software-based Inverse ShiftRows, Inverse SubBytes, Inverse MixColumns, and XOR).
-2.  **`aesenc`** and **`aesenclast`** (using software-based ShiftRows, SubBytes, MixColumns, and XOR).
-3.  **`pclmulqdq`** (using 64-bit GF(2) polynomial carry-less multiplication).
-
-It decodes `ModRM` and `REX` prefixes (`REX.R` and `REX.B`) to correctly fetch and update `XMM` registers (including extended registers `XMM8`-`XMM15`) in the thread context (`uc->uc_mcontext.fpregs->_xmm`), before advancing `RIP` by the exact instruction length.
-
-### Phase 3.3: Wrapper Integration
-We organized the files under `~/.local/bin`:
-*   `agy.orig`: The original, unmodified executable.
-*   `agy.real`: The statically patched executable.
-*   `agy`: A transparent bash wrapper script:
-    ```bash
-    #!/bin/bash
-    export LD_PRELOAD=/home/michael/sigill_emulator.so
-    exec /home/michael/.local/bin/agy.real "$@"
-    ```
+### 3. Finding the File Offset
+Since GDB loads the executable at a randomized/base address, we calculated the relative offset inside the file on disk:
+* GDB Base Load Address: `0x0000555555400000`
+* Offset = `0x55555c467efe - 0x555555400000 = 0x7067efe`
+* disassembling bytes at file offset `0x7067efe` verified the exact instruction as: `66 0f 38 de c1` (`aesdec xmm0, xmm1`).
 
 ---
 
-## 4. Verification
+## 🔴 Expert Level: Surgical Bytes and Code Patches
 
-Executing `agy --help` directly through the wrapper is 100% successful and executes at native speeds:
-```text
-Usage of /home/michael/.local/bin/agy.real:
-  --add-dir                       Add a directory to the workspace (repeatable) (default [])
-  -c                              Short alias for --continue
-  ...
+Below is the low-level description of the binary patches and dynamic emulation hooks.
+
+### 1. The Go Runtime Check Bypass (Static Patch)
+The gatekeeper check function `cpu.Initialize` was located at file offset `0x74D0F00`.
+
+* **Original Assembly Sequence**:
+  * Offset `0x74D0F06`: `E8 D5 3D 09 00` (`call cpu.Initialize`)
+  * Offset `0x74D0F0B`: `8B 05 FF 0F 4A 02` (`mov 0x24a0fff(%rip), %eax`) - this moves the CPUID capabilities to `%eax` for validation.
+  
+* **Bypass Patch**:
+  We patched the instruction at `0x74D0F0B` with a relative jump (`jmp`) targeting the function epilogue (return block) at `0x74D0FC3`:
+  * Epilogue location: `0x74D0FC3` (`add $0x8, %rsp; pop %rbx; pop %rbp; ret`)
+  * Patch bytes written: `E9 B3 00 00 00 90`
+    * `E9 B3 00 00 00` -> relative jump instruction (`jmp 0x74d0fc3`).
+    * `90` -> `NOP` padding to match the original 6-byte instruction boundary.
+  
+This bypasses Go's CPU check validation function while allowing `cpu.Initialize` to correctly record `cpu.X86.HasAES = false`, steering the binary into code paths where we can dynamically catch the instructions.
+
+### 2. Integration Wrapper
+We saved the patched binary as `agy.real` and created a shell wrapper `agy`:
+```bash
+#!/bin/bash
+export LD_PRELOAD=/home/michael/sigill_emulator.so
+exec /home/michael/.local/bin/agy.real "$@"
 ```
-Verification confirmed the emulator successfully handles dozens of dynamic `aesdec` and `aesenc` operations on startup with zero crashes or issues.
+This ensures the emulation layer is injected into the program memory space before `main` starts executing.
