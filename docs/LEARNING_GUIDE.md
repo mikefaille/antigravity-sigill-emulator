@@ -197,6 +197,30 @@ gcc -shared -fPIC -O2 -Wall -o sigill_emulator.so src/sigill_emulator.c
 *   **`-O2`**: Activates Level 2 optimization, which is essential to minimize signal-trapping latency.
 *   **`-Wall`**: Enables all compiler warning messages to ensure code safety.
 
+### 🚨 Troubleshooting: Atomic Installation and `LD_PRELOAD` Race Conditions
+
+If you copy the newly compiled shared library directly over the existing path where a running process (like `agy`) has preloaded it using `LD_PRELOAD`:
+```bash
+# DO NOT DO THIS directly on an active preload target!
+cp sigill_emulator.so /home/michael/sigill_emulator.so
+```
+You will encounter this linker error:
+```text
+ERROR: ld.so: object '/home/michael/sigill_emulator.so' from LD_PRELOAD cannot be preloaded (cannot open shared object file): ignored.
+```
+
+#### Why does this happen?
+When you use `cp`, it opens the destination file and truncates it to 0 bytes, then writes the new content block-by-block. If any new subprocess (such as dynamic Go runtime threads) tries to start during this write window, the dynamic linker (`ld.so`) attempts to read the library, finds it incomplete or truncated (0 bytes), fails to load it, and prints the error message.
+
+#### The Solution: Atomic Installation
+To prevent this race condition, you must replace the shared library **atomically** using the filesystem's rename operation. Renaming changes the directory entry pointing to the file inode in a single, atomic operation, ensuring that any process attempting to load it will either get the complete old version or the complete new version:
+```bash
+# Correct atomic sequence:
+cp sigill_emulator.so /home/michael/sigill_emulator.so.tmp
+mv /home/michael/sigill_emulator.so.tmp /home/michael/sigill_emulator.so
+```
+This is fully automated in the project's [Makefile](../Makefile) under the `install` target.
+
 ---
 
 ## 💻 Hacking Exercise 1: Add a Dummy Instruction to the Emulator
