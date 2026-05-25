@@ -637,9 +637,21 @@ static void patch_code(uint8_t *rip, int bytes_consumed) {
     if (!emu_mode_experimental) {
         return;
     }
+    
+    /*
+     * UNIDIRECTIONAL FALLBACK STRATEGY (Graceful Degradation):
+     * If JIT patching fails at any stage (e.g. strict W^X/SELinux blocks allocation
+     * of Trampoline Islands, or mprotect fails, or page table changes are denied),
+     * we return early without modifying the calling code.
+     * The signal handler will automatically execute via Option A (pure software emulation).
+     * Since the instruction is left unpatched, subsequent executions of this address
+     * will trap again and seamlessly execute via Option A. This per-instruction granularity
+     * ensures that JIT failures do not crash the host program.
+     */
     if (!island_page) {
         island_page = allocate_trampoline_island(rip);
         if (!island_page) {
+            // Fallback to Option A: JIT allocation failed
             return;
         }
     }
@@ -667,6 +679,7 @@ static void patch_code(uint8_t *rip, int bytes_consumed) {
     
     uintptr_t page_start = (uintptr_t)rip & ~0xFFF;
     if (mprotect((void *)page_start, 4096 * 2, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        // Fallback to Option A: mprotect denied write-execute permissions (SELinux / W^X block)
         return;
     }
     
@@ -724,6 +737,14 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
         _exit(133);
     }
     
+    /*
+     * OPTION A FAILSAFE IMMUNITY: Option A (Safe Mode) functions as our ultimate
+     * resource-exhaustion floor. The rip_cache metadata table is statically allocated 
+     * at load time (~56 KB) and never performs dynamic allocations (like malloc/mmap)
+     * at runtime. If multiple concurrent threads collide at a cache index, the old 
+     * entry is evicted via the Seqlock protocol. Thus, Option A is immune to memory
+     * scarcity and guaranteed to succeed.
+     */
     // Try lock-free cache lookup first
     uint32_t idx = get_cache_index(rip);
     struct cache_entry *entry = &rip_cache[idx];
