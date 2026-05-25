@@ -49,24 +49,36 @@ static const uint8_t inv_sbox[256] = {
     0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
 };
 
-static inline uint8_t gmul(uint8_t x, uint8_t y) {
-    uint8_t p = 0;
-    for (int i = 0; i < 8; i++) {
-        if (y & 1) p ^= x;
-        uint8_t carry = x & 0x80;
-        x <<= 1;
-        if (carry) x ^= 0x1B;
-        y >>= 1;
-    }
-    return p;
-}
-
 static inline uint8_t gmul2(uint8_t x) {
-    return (x & 0x80) ? ((x << 1) ^ 0x1B) : (x << 1);
+    return (x << 1) ^ (((int8_t)x >> 7) & 0x1B);
 }
 
 static inline uint8_t gmul3(uint8_t x) {
     return gmul2(x) ^ x;
+}
+
+static inline uint8_t gmul4(uint8_t x) {
+    return gmul2(gmul2(x));
+}
+
+static inline uint8_t gmul8(uint8_t x) {
+    return gmul2(gmul4(x));
+}
+
+static inline uint8_t gmul9(uint8_t x) {
+    return gmul8(x) ^ x;
+}
+
+static inline uint8_t gmul11(uint8_t x) {
+    return gmul8(x) ^ gmul2(x) ^ x;
+}
+
+static inline uint8_t gmul13(uint8_t x) {
+    return gmul8(x) ^ gmul4(x) ^ x;
+}
+
+static inline uint8_t gmul14(uint8_t x) {
+    return gmul8(x) ^ gmul4(x) ^ gmul2(x);
 }
 
 static void mix_columns(uint8_t *state) {
@@ -90,10 +102,10 @@ static void inv_mix_columns(uint8_t *state) {
         uint8_t s2 = state[2 + i*4];
         uint8_t s3 = state[3 + i*4];
         
-        state[0 + i*4] = gmul(s0, 0x0e) ^ gmul(s1, 0x0b) ^ gmul(s2, 0x0d) ^ gmul(s3, 0x09);
-        state[1 + i*4] = gmul(s0, 0x09) ^ gmul(s1, 0x0e) ^ gmul(s2, 0x0b) ^ gmul(s3, 0x0d);
-        state[2 + i*4] = gmul(s0, 0x0d) ^ gmul(s1, 0x09) ^ gmul(s2, 0x0e) ^ gmul(s3, 0x0b);
-        state[3 + i*4] = gmul(s0, 0x0b) ^ gmul(s1, 0x0d) ^ gmul(s2, 0x09) ^ gmul(s3, 0x0e);
+        state[0 + i*4] = gmul14(s0) ^ gmul11(s1) ^ gmul13(s2) ^ gmul9(s3);
+        state[1 + i*4] = gmul9(s0) ^ gmul14(s1) ^ gmul11(s2) ^ gmul13(s3);
+        state[2 + i*4] = gmul13(s0) ^ gmul9(s1) ^ gmul14(s2) ^ gmul11(s3);
+        state[3 + i*4] = gmul11(s0) ^ gmul13(s1) ^ gmul9(s2) ^ gmul14(s3);
     }
 }
 
@@ -171,8 +183,9 @@ static void emulate_pclmulqdq(uint8_t *dest, const uint8_t *src, uint8_t imm) {
     else memcpy(&b, src, 8);
     
     uint64_t low = 0, high = 0;
-    for (int i = 0; i < 64; i++) {
-        if ((b >> i) & 1) {
+    uint64_t temp_b = b;
+    for (int i = 0; temp_b != 0; i++) {
+        if (temp_b & 1) {
             if (i == 0) {
                 low ^= a;
             } else {
@@ -180,6 +193,7 @@ static void emulate_pclmulqdq(uint8_t *dest, const uint8_t *src, uint8_t imm) {
                 high ^= (a >> (64 - i));
             }
         }
+        temp_b >>= 1;
     }
     memcpy(dest, &low, 8);
     memcpy(dest + 8, &high, 8);

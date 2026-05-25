@@ -1,14 +1,19 @@
 # Under the Hood: A Systems Programming Learning Guide
 
-Welcome, software engineer! This guide is designed to teach you the low-level systems programming concepts behind this toolkit. By the end of this guide, you will understand exactly how we intercept hardware instructions, how operating system signals work, and how you can manually "hack" and extend this project without needing any AI assistance.
+Welcome, fellow developer! This guide is designed to teach you the fundamental concepts of low-level [systems programming](https://en.wikipedia.org/wiki/Systems_programming) behind this toolkit. 
+
+To ensure this guide is fully accessible, **we assume zero prior knowledge** of CPU internals or operating system architectures. We will define every key concept from scratch, and we provide [Wikipedia](https://www.wikipedia.org/) links for complementary reading.
 
 ---
 
 ## 🗺️ High-Level Architecture Overview
-This toolkit bypasses hardware constraints using two core computer science techniques:
+A computer program is ultimately a sequence of instructions stored in a binary file. When executed, the [central processing unit (CPU)](https://en.wikipedia.org/wiki/Central_processing_unit) decodes and runs these instructions one by one.
 
-1.  **Dynamic Hooking (`LD_PRELOAD`)**: Forcing our own custom C library to load inside the target program before the program even starts.
-2.  **Hardware Exception Trapping (`SIGILL`)**: Catching the processor's "I don't understand this instruction" crash signal, executing the math in software, and resuming the program.
+If a binary is compiled to use modern instructions (like [AES-NI](https://en.wikipedia.org/wiki/AES_instruction_set) for encryption or [PCLMULQDQ](https://en.wikipedia.org/wiki/CLMUL_instruction_set) for carry-less multiplication) but is run on a legacy CPU that physically lacks those circuits, the CPU does not know what to do. It halts and crashes the program.
+
+Our toolkit bypasses this hardware limitation using two core techniques:
+1.  **Dynamic Hooking (`LD_PRELOAD`)**: Injecting our custom [shared library](https://en.wikipedia.org/wiki/Shared_library) into the target program's memory at startup.
+2.  **Hardware Exception Trapping (`SIGILL`)**: Intercepting the CPU's crash signal, decoding the unsupported instructions, executing their mathematical logic in software on the fly, and resuming the program cleanly.
 
 ```text
 +-------------------------------------------------------------+
@@ -44,10 +49,18 @@ This toolkit bypasses hardware constraints using two core computer science techn
 ---
 
 ## 🧠 Core Concept 1: Dynamic Library Loading (`LD_PRELOAD`)
-When you run a program in Linux (like `./bin`), the operating system loads the executable file into memory, looks at its dependencies (like `libc.so`), and uses a program called the **dynamic linker** (`ld.so`) to load and link those shared libraries.
 
-### The Hook: `LD_PRELOAD`
-`LD_PRELOAD` is an environment variable that tells the dynamic linker: *"Load this specific library first, before any other libraries, and override any matching symbols."*
+Before a program runs, it must be loaded into the computer's [random-access memory (RAM)](https://en.wikipedia.org/wiki/Random-access_memory). 
+
+### Statically vs. Dynamically Linked Programs
+*   **Static Linking**: All dependency code is bundled directly into the single executable file.
+*   **Dynamic Linking**: The executable contains references to external files called **shared libraries** (e.g. `.so` files on Linux, `.dll` on Windows). 
+
+When a dynamically linked program starts, the [operating system loader](https://en.wikipedia.org/wiki/Loader_(computing)) runs a special helper program called the [dynamic linker](https://en.wikipedia.org/wiki/Dynamic_linker) (on Linux, usually `ld-linux.so`). This linker searches for the required shared libraries, loads them into memory, and resolves the function addresses so the program can call them.
+
+### What is `LD_PRELOAD`?
+The dynamic linker supports an override mechanism called [preloading](https://en.wikipedia.org/wiki/Dynamic_linker#Dynamic_linking_in_Unix-like_systems). By setting the `LD_PRELOAD` [environment variable](https://en.wikipedia.org/wiki/Environment_variable) to point to our library (`sigill_emulator.so`), we tell the dynamic linker: 
+*"Load our library first, before any standard system library, and override any matching function symbols."*
 
 In [sigill_emulator.c](../src/sigill_emulator.c), we define a constructor:
 ```c
@@ -58,45 +71,52 @@ static void init(void) {
     ...
 }
 ```
-The `__attribute__((constructor))` is a GCC compiler directive. It registers the function in the ELF binary's `.init_array` section. When the OS loads the library, it executes all functions in `.init_array` first.
+The `__attribute__((constructor))` is a compiler directive. It registers the function in the Executable and Linkable Format ([ELF](https://en.wikipedia.org/wiki/Executable_and_Linkable_Format)) binary's `.init_array` section. When the OS loads the library, it executes all functions in `.init_array` first.
 
 ---
 
 ## 🧠 Core Concept 2: Hardware Exceptions & POSIX Signals
-When the CPU decoder encounters a byte sequence it cannot execute (e.g., an `aesenc` instruction on an old Intel CPU lacking the AES-NI extension), the CPU hardware triggers an **invalid opcode exception** (fault).
 
-1.  The CPU halts the execution of the thread immediately.
-2.  The CPU switches from User Mode to Kernel Mode and runs the operating system's interrupt handler.
-3.  The Linux kernel packages this hardware interrupt as a **POSIX signal**: `SIGILL` (Signal Illegal Instruction).
-4.  The kernel looks at the process's signal table. Since our constructor called `sigaction(SIGILL, &sa, &old_sa)`, the kernel jumps back to user space to execute our `handler` function.
+CPUs read instructions in the form of binary byte sequences called [opcodes](https://en.wikipedia.org/wiki/Opcode). If the CPU reads an opcode that does not exist in its instruction set architecture (ISA), it cannot proceed.
+
+### The Trap-and-Emulate Sequence:
+1.  **Hardware Exception**: The CPU halts the running thread and triggers an [illegal instruction exception](https://en.wikipedia.org/wiki/Illegal_instruction) (a type of hardware [interrupt](https://en.wikipedia.org/wiki/Interrupt)).
+2.  **Privilege Transition**: The CPU switches from [User Mode to Kernel Mode](https://en.wikipedia.org/wiki/User_space_and_kernel_space) (giving the OS full control over hardware) and invokes the operating system's [interrupt handler](https://en.wikipedia.org/wiki/Interrupt_handler).
+3.  **Signal Delivery**: The Linux kernel translates this hardware interrupt into a user-space [POSIX signal](https://en.wikipedia.org/wiki/Signal_(IPC)) called `SIGILL` (Signal Illegal Instruction).
+4.  **Signal Handler Redirect**: Normally, `SIGILL` terminates the program ("Illegal instruction (core dumped)"). However, since our preloaded library registered a custom [signal handler](https://en.wikipedia.org/wiki/Signal_(IPC)#Handling_signals) using the `sigaction` system call, the kernel switches the thread back to User Mode and executes our handler function.
 
 ---
 
 ## 🧠 Core Concept 3: Thread Context Manipulation (`ucontext_t`)
-When the operating system calls our signal handler, it passes three arguments:
+
+A CPU uses ultra-fast internal storage units called [processor registers](https://en.wikipedia.org/wiki/Processor_register) to hold temporary values, memory addresses, and execution states. 
+
+When a signal interrupts a thread, the operating system must save the values of all registers (a [register context](https://en.wikipedia.org/wiki/Context_(computing))) so that execution can resume later as if nothing happened. The OS passes this snapshot to our handler as the third argument:
 ```c
 static void handler(int sig, siginfo_t *si, void *ctx_void)
 ```
-*   `sig`: The signal number (`SIGILL` is `4`).
-*   `si`: A pointer to `siginfo_t` containing metadata about the crash (like the crash address).
-*   `ctx_void`: A pointer to `ucontext_t` representing the **CPU register snapshot** at the exact millisecond of the crash.
+*   `ctx_void`: A pointer to a structure (`ucontext_t`) representing the saved CPU registers.
 
 ### 1. Reading the Instruction Pointer (`RIP`)
-On x86-64 Linux, the instruction pointer (the program counter tracking which byte is running) is stored in the registers array:
+The most important register is the [instruction pointer / program counter (RIP)](https://en.wikipedia.org/wiki/Program_counter). It contains the memory address of the instruction currently executing.
 ```c
 uint8_t *rip = (uint8_t *)uc->uc_mcontext.gregs[REG_RIP];
 ```
-By reading bytes from `rip[0]`, `rip[1]`, etc., we can parse the opcode. For example:
-*   `0x66`: Operand size override prefix (indicates SSE instruction).
-*   `0x40` to `0x4f`: REX prefix (extends register access to `XMM8`-`XMM15`).
-*   `0x0F 0x38 0xDC`: The opcode bytes for `AESENC`.
+By inspecting the bytes starting at the memory address pointed to by `rip` (`rip[0]`, `rip[1]`, etc.), our code can look at the raw [instruction bytes](https://en.wikipedia.org/wiki/X86_instruction_listings) to determine exactly which unsupported instruction failed (e.g. `0x0F 0x38 0xDC` for `AESENC`).
 
 ### 2. Modifying Registers & Skipping the Instruction
-In our emulator, we extract the register indexes from the ModRM byte, emulate the math, and write the output directly into the CPU register context:
-```c
-uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
-// ... write emulated math bytes to dest ...
-```
+To emulate the instruction, we:
+1.  Parse the [ModR/M byte](https://en.wikipedia.org/wiki/ModR/M) (a byte following the opcode that specifies which registers or memory locations are the operands).
+2.  Perform the corresponding math in software.
+3.  Write the resulting value back into the saved register context (like the 128-bit vector [XMM registers](https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions) used for SSE/AES calculations):
+    ```c
+    uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
+    ```
+4.  **Crucial Step**: If we return now, the CPU will try to execute the exact same instruction at `RIP` again, leading to an infinite crash loop. We must manually advance `RIP` in the saved context record past the instruction length:
+    ```c
+    uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
+    ```
+When our handler returns, the operating system restores the modified context, and the CPU resumes executing the program smoothly at the next instruction!
 
 ### 3. Upgraded Concept: Register-to-Memory Address Decoding
 Not all instructions operate in register-to-register mode (`mod == 3`). In more advanced cases, instructions load and process round keys directly from read-only data segments (`.rodata`) in memory, e.g. using RIP-relative addressing:
@@ -109,10 +129,54 @@ To support these memory operands, the emulator parses the **ModRM byte**, option
 
 We fetch the corresponding register values from `uc->uc_mcontext.gregs` and retrieve the memory bytes at the computed address directly, allowing flawless emulation of memory-operand instructions.
 
-**Crucial Step**: If we return from the signal handler now, the CPU will try to execute the exact same instruction at `RIP` again, leading to an infinite crash loop. We must manually advance `RIP` in the context record past the instruction length:
+---
+
+## 🧠 Core Concept 4: Finite Field Math & Branchless Optimization
+
+The Advanced Encryption Standard (AES) relies on mathematical operations in a [finite field / Galois Field](https://en.wikipedia.org/wiki/Finite_field) (specifically $\text{GF}(2^8)$). In this mathematical system, addition is represented by bitwise [exclusive OR (XOR)](https://en.wikipedia.org/wiki/Exclusive_or) operations, and multiplication is defined modulo an irreducible polynomial ($x^8 + x^4 + x^3 + x + 1$, or hex `0x1B`).
+
+### The Traditional Approach (Looping Multiplication)
+Traditionally, multiplying two numbers in $\text{GF}(2^8)$ requires a loop that iterates 8 times (once for each bit), checking conditions and performing shifts:
 ```c
-uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed; // Advance exactly by the instruction length
+static inline uint8_t gmul(uint8_t x, uint8_t y) {
+    uint8_t p = 0;
+    for (int i = 0; i < 8; i++) {
+        if (y & 1) p ^= x;
+        uint8_t carry = x & 0x80;
+        x <<= 1;
+        if (carry) x ^= 0x1B;
+        y >>= 1;
+    }
+    return p;
+}
 ```
+While simple, this loop introduces multiple **conditional branches**. In modern pipelined CPUs, branch mispredictions cause CPU stalls, adding latency. During deep decryption operations (which execute `inv_mix_columns` calling multiplication 64 times per block), this introduces massive CPU overhead.
+
+### The Branchless Optimization
+Because the decryption steps multiply solely by fixed constants ($9$, $11$, $13$, and $14$), we can pre-factor the shifts and make the operations entirely **branchless**:
+
+1.  **Branchless doubling (`gmul2`)**:
+    We perform the check for the carry bit using arithmetic bit shifts instead of a branch. If the high bit of `x` is set, `(int8_t)x >> 7` evaluates to `0xFF` (all bits 1), and `0xFF & 0x1B` yields `0x1B`. If clear, it evaluates to `0x00`:
+    ```c
+    static inline uint8_t gmul2(uint8_t x) {
+        return (x << 1) ^ (((int8_t)x >> 7) & 0x1B);
+    }
+    ```
+2.  **Power-of-Two double chains**:
+    We define multiplying by 4 and 8 as cascading inline calls to `gmul2`:
+    ```c
+    static inline uint8_t gmul4(uint8_t x) { return gmul2(gmul2(x)); }
+    static inline uint8_t gmul8(uint8_t x) { return gmul2(gmul4(x)); }
+    ```
+3.  **Constant reconstruction**:
+    Since multiplication distributes over XOR addition in finite fields, we reconstruct multiplication by the constants 9, 11, 13, and 14 using simple XOR operations on our power-of-two helper functions:
+    *   $\text{gmul9}(x) = (x \cdot 8) \oplus x$
+    *   $\text{gmul11}(x) = (x \cdot 8) \oplus (x \cdot 2) \oplus x$
+    *   $\text{gmul13}(x) = (x \cdot 8) \oplus (x \cdot 4) \oplus x$
+    *   $\text{gmul14}(x) = (x \cdot 8) \oplus (x \cdot 4) \oplus (x \cdot 2)$
+
+This optimization removes all loop iterations and conditional branches from our hot math paths, reducing CPU cycle consumption.
+
 When our handler returns, the OS restores the context, and the CPU resumes executing the program at the updated `RIP` address.
 
 ---
