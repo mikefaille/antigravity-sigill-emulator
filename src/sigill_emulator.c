@@ -49,34 +49,49 @@ static const uint8_t inv_sbox[256] = {
     0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
 };
 
+/*
+ * Galois Field GF(2^8) arithmetic helpers.
+ * In GF(2^8), addition is represented by bitwise XOR.
+ * Multiplication by 2 (gmul2) shifts the byte left by 1 bit. If the high bit was set
+ * (representing a value >= 128), we reduce it by XORing with the AES polynomial 0x1B.
+ * We make this operation branchless by using an arithmetic shift right by 7 on a signed 8-bit integer
+ * to create a bitmask (0xFF if high bit is set, 0x00 if not) and bitwise-ANDing it with 0x1B.
+ */
 static inline uint8_t gmul2(uint8_t x) {
     return (x << 1) ^ (((int8_t)x >> 7) & 0x1B);
 }
 
+/* Multiplying by 3 is (x * 2) XOR x */
 static inline uint8_t gmul3(uint8_t x) {
     return gmul2(x) ^ x;
 }
 
+/* Multiplying by 4 is gmul2(gmul2(x)) */
 static inline uint8_t gmul4(uint8_t x) {
     return gmul2(gmul2(x));
 }
 
+/* Multiplying by 8 is gmul2(gmul4(x)) */
 static inline uint8_t gmul8(uint8_t x) {
     return gmul2(gmul4(x));
 }
 
+/* Multiplying by 9 is (x * 8) XOR x */
 static inline uint8_t gmul9(uint8_t x) {
     return gmul8(x) ^ x;
 }
 
+/* Multiplying by 11 is (x * 8) XOR (x * 2) XOR x */
 static inline uint8_t gmul11(uint8_t x) {
     return gmul8(x) ^ gmul2(x) ^ x;
 }
 
+/* Multiplying by 13 is (x * 8) XOR (x * 4) XOR x */
 static inline uint8_t gmul13(uint8_t x) {
     return gmul8(x) ^ gmul4(x) ^ x;
 }
 
+/* Multiplying by 14 is (x * 8) XOR (x * 4) XOR (x * 2) */
 static inline uint8_t gmul14(uint8_t x) {
     return gmul8(x) ^ gmul4(x) ^ gmul2(x);
 }
@@ -174,16 +189,29 @@ static void emulate_aesimc(uint8_t *dest, const uint8_t *src) {
     memcpy(dest, tmp, 16);
 }
 
+/*
+ * Emulates the PCLMULQDQ instruction (Carry-Less Multiplication of Quadwords).
+ * This multiplies two 64-bit values (low or high halves of dest and src XMM registers,
+ * chosen by the immediate byte imm) using carry-less multiplication (XOR instead of addition).
+ * We optimize this loop by shifting temp_b and exiting early when temp_b reaches 0,
+ * which significantly reduces cycles for sparse inputs.
+ */
 static void emulate_pclmulqdq(uint8_t *dest, const uint8_t *src, uint8_t imm) {
     uint64_t a, b;
+    
+    // Select the lower or upper 64-bit half of the destination register
     if (imm & 1) memcpy(&a, dest + 8, 8);
     else memcpy(&a, dest, 8);
     
+    // Select the lower or upper 64-bit half of the source register
     if (imm & 16) memcpy(&b, src + 8, 8);
     else memcpy(&b, src, 8);
     
     uint64_t low = 0, high = 0;
     uint64_t temp_b = b;
+    
+    // Perform carry-less multiplication. Since addition is XOR, we do not carry bits.
+    // Loop only as long as there are set bits left in temp_b to process (early exit).
     for (int i = 0; temp_b != 0; i++) {
         if (temp_b & 1) {
             if (i == 0) {
@@ -195,6 +223,8 @@ static void emulate_pclmulqdq(uint8_t *dest, const uint8_t *src, uint8_t imm) {
         }
         temp_b >>= 1;
     }
+    
+    // Write the 128-bit result back to the destination register
     memcpy(dest, &low, 8);
     memcpy(dest + 8, &high, 8);
 }
@@ -321,17 +351,28 @@ static uint8_t *resolve_mem_addr(ucontext_t *uc, uint8_t *rip, int has_rex, uint
     return (uint8_t *)(base_val + (index_val << scale) + disp);
 }
 
+/*
+ * The SIGILL signal handler.
+ * This is invoked by the OS kernel when an invalid opcode exception occurs.
+ * We parse the instruction pointer (RIP) in the saved thread context (ucontext_t)
+ * to determine if the crash was caused by an unsupported AES-NI or PCLMULQDQ instruction.
+ * If so, we emulate it and advance the RIP register so the program can resume.
+ */
 static void handler(int sig, siginfo_t *si, void *ctx_void) {
     ucontext_t *uc = (ucontext_t *)ctx_void;
     if (!uc->uc_mcontext.fpregs) {
         _exit(133);
     }
     
+    // Get the instruction pointer (RIP) representing where the crash occurred
     uint8_t *rip = (uint8_t *)uc->uc_mcontext.gregs[REG_RIP];
     
+    // 0x66 prefix is used by x86 to indicate an SSE (Streaming SIMD Extensions) instruction
     if (rip[0] == 0x66) {
         int has_rex = 0;
         uint8_t rex = 0;
+        
+        // REX prefix (0x40 to 0x4f) on x86-64 extends register access (e.g. accessing XMM8-XMM15)
         if (rip[1] >= 0x40 && rip[1] <= 0x4f) {
             has_rex = 1;
             rex = rip[1];
@@ -339,38 +380,51 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
         
         uint8_t *opcode = rip + 1 + has_rex;
         
+        // Check for AES instruction opcodes: 0x0F 0x38 followed by 0xDE (aesdec), 0xDF (aesdeclast),
+        // 0xDB (aesimc), 0xDC (aesenc), or 0xDD (aesenclast)
         if (opcode[0] == 0x0f && opcode[1] == 0x38 && (opcode[2] == 0xde || opcode[2] == 0xdf || opcode[2] == 0xdb || opcode[2] == 0xdc || opcode[2] == 0xdd)) {
             uint8_t op_type = opcode[2];
             uint8_t modrm = opcode[3];
+            
+            // Extract destination register index from the ModRM byte (bits 3-5)
             uint8_t reg_idx = (modrm >> 3) & 7;
             if (has_rex) {
+                // If REX.R bit (bit 2 of REX prefix) is set, add 8 to register index
                 if (rex & 4) reg_idx += 8;
             }
+            
+            // Get pointer to the destination XMM register in the saved CPU context
             uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
             
+            // If mod field of ModRM byte is 3, it's a register-to-register operation
             if ((modrm >> 6) == 3) {
+                // Extract source register index from the ModRM byte (bits 0-2)
                 uint8_t rm_idx = modrm & 7;
-                if (has_rex && (rex & 1)) rm_idx += 8;
+                if (has_rex && (rex & 1)) rm_idx += 8; // REX.B bit extends source register index
+                
                 uint8_t *src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[rm_idx];
                 
                 if (debug_emu) {
                     log_emu_aes(op_type, reg_idx, rm_idx);
                 }
                 
+                // Route to the appropriate mathematical emulator
                 if (op_type == 0xde) emulate_aesdec(dest, src);
                 else if (op_type == 0xdf) emulate_aesdeclast(dest, src);
                 else if (op_type == 0xdb) emulate_aesimc(dest, src);
                 else if (op_type == 0xdc) emulate_aesenc(dest, src);
                 else if (op_type == 0xdd) emulate_aesenclast(dest, src);
                 
+                // Skip the executed instruction (prefix + opcode + ModRM = 5 bytes + REX)
                 uc->uc_mcontext.gregs[REG_RIP] += (5 + has_rex);
                 return;
             } else {
+                // Register-to-memory operation: resolve the target effective memory address
                 int bytes_consumed = 0;
                 uint8_t *src = resolve_mem_addr(uc, rip, has_rex, rex, modrm, &bytes_consumed);
                 
                 if (debug_emu) {
-                    log_emu_aes(op_type, reg_idx, 99); // 99 indicates memory operand
+                    log_emu_aes(op_type, reg_idx, 99); // 99 represents memory operand
                 }
                 
                 if (op_type == 0xde) emulate_aesdec(dest, src);
@@ -379,13 +433,17 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 else if (op_type == 0xdc) emulate_aesenc(dest, src);
                 else if (op_type == 0xdd) emulate_aesenclast(dest, src);
                 
+                // Skip the executed instruction by the calculated byte length
                 uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
                 return;
             }
         } else if (opcode[0] == 0x0f && opcode[1] == 0x3a && opcode[2] == 0x44) {
             uint8_t modrm = opcode[3];
+            
+            // Extract destination register index from the ModRM byte (bits 3-5)
             uint8_t reg_idx = (modrm >> 3) & 7;
             if (has_rex) {
+                // REX.R bit extends destination register index
                 if (rex & 4) reg_idx += 8;
             }
             uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
@@ -393,7 +451,7 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
             if ((modrm >> 6) == 3) {
                 uint8_t imm = opcode[4];
                 uint8_t rm_idx = modrm & 7;
-                if (has_rex && (rex & 1)) rm_idx += 8;
+                if (has_rex && (rex & 1)) rm_idx += 8; // REX.B bit extends source register index
                 
                 uint8_t *src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[rm_idx];
                 
@@ -403,12 +461,13 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 
                 emulate_pclmulqdq(dest, src, imm);
                 
+                // Skip instruction (prefix + opcode + ModRM + imm = 6 bytes + REX)
                 uc->uc_mcontext.gregs[REG_RIP] += (6 + has_rex);
                 return;
             } else {
                 int bytes_consumed = 0;
                 uint8_t *src = resolve_mem_addr(uc, rip, has_rex, rex, modrm, &bytes_consumed);
-                uint8_t imm = rip[bytes_consumed - 1];
+                uint8_t imm = rip[bytes_consumed - 1]; // Immediate byte is at the end of instruction
                 
                 if (debug_emu) {
                     log_emu_pclmul(reg_idx, 99, imm);
@@ -416,12 +475,14 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 
                 emulate_pclmulqdq(dest, src, imm);
                 
+                // Skip instruction by the calculated byte length
                 uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
                 return;
             }
         }
     }
     
+    // Fallback: chain execution back to the original SIGILL handler if it is not one of our target instructions
     if (old_sa.sa_flags & SA_SIGINFO) {
         if (old_sa.sa_sigaction) {
             old_sa.sa_sigaction(sig, si, ctx_void);
@@ -442,17 +503,26 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
     _exit(132);
 }
 
+/*
+ * Shared library constructor function.
+ * This runs when the library is loaded via LD_PRELOAD, before main() of the host program.
+ * We check the environment for debug flags and hook the SIGILL signal handler.
+ */
 __attribute__((constructor))
 static void init(void) {
+    // Check if emulation debug tracing is requested
     char *env_dbg = getenv("DEBUG_EMU");
     if (env_dbg && strcmp(env_dbg, "1") == 0) {
         debug_emu = 1;
     }
     
+    // Register our SIGILL handler while saving the original handler (old_sa) to chain fallback calls
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = handler;
     sigemptyset(&sa.sa_mask);
+    
+    // SA_SIGINFO provides the ucontext pointer; SA_NODEFER prevents blocking nested SIGILL signals
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigaction(SIGILL, &sa, &old_sa);
 }
