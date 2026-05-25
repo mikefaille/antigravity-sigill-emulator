@@ -9,9 +9,9 @@ TARGET_V2 = sigill_emulator_v2.so
 
 SRC = src/sigill_emulator.c
 INSTALL_DIR = /home/michael
-VERSION ?= v1.0.16
+VERSION ?= v1.0.17
 
-RELEASE_FILES = src/sigill_emulator.c Makefile README.md docs/LEARNING_GUIDE.md docs/SKILL.md scripts/find_bad_insns.py docs/session_log.md docs/AGENTS.md pyproject.toml uv.lock LICENSE benchmark/benchmark.c docs/benchmark_results.md .gitignore
+RELEASE_FILES = src/sigill_emulator.c Makefile README.md docs/LEARNING_GUIDE.md docs/SKILL.md scripts/find_bad_insns.py docs/session_log.md docs/AGENTS.md pyproject.toml uv.lock LICENSE benchmark/benchmark.c docs/benchmark_results.md .gitignore AGENTS.md .cursor/skills/agy-compat/SKILL.md
 
 .PHONY: all clean install benchmark release
 
