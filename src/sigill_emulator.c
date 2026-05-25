@@ -324,94 +324,6 @@ static uint64_t get_register_val(ucontext_t *uc, int reg_idx) {
     return uc->uc_mcontext.gregs[reg_map[reg_idx]];
 }
 
-/*
- * Resolves the effective memory address for instructions with memory operands.
- * In x86_64, instruction addressing is defined by ModR/M and SIB bytes:
- *   - ModR/M Byte: bits [7:6] = Mod (Addressing mode), bits [5:3] = Reg/Opcode, bits [2:0] = R/M
- *   - SIB (Scale-Index-Base) Byte: bits [7:6] = Scale (0, 1, 2, 3 -> factor 1, 2, 4, 8),
- *     bits [5:3] = Index register index, bits [2:0] = Base register index.
- * See: https://en.wikipedia.org/wiki/ModR/M
- */
-static uint8_t *resolve_mem_addr(ucontext_t *uc, uint8_t *rip, int has_rex, uint8_t rex, uint8_t modrm, int *bytes_consumed) {
-    uint8_t mod = modrm >> 6;
-    uint8_t rm = modrm & 7;
-    uint8_t *ptr = rip + 1 + has_rex + 3; // Pointing past: prefix(0x66) + REX + Opcode(3 bytes) to ModR/M+1
-    
-    uint64_t base_val = 0;
-    uint64_t index_val = 0;
-    int scale = 0;
-    int32_t disp = 0;
-    
-    // Mod == 0, R/M == 5 indicates RIP-relative addressing (Base is instruction pointer + displacement)
-    if (mod == 0 && rm == 5) {
-        int32_t disp32;
-        memcpy(&disp32, ptr, 4);
-        ptr += 4;
-        // PCLMULQDQ (opcode 0x3a) includes a 1-byte immediate suffix at the end of the instruction,
-        // which must be accounted for to correctly calculate the next instruction's address (RIP_next).
-        int has_imm = (rip[1+has_rex+1] == 0x3a);
-        uint8_t *rip_next = ptr + (has_imm ? 1 : 0);
-        *bytes_consumed = (rip_next - rip);
-        return rip_next + disp32;
-    }
-    
-    // R/M == 4 indicates the presence of a SIB (Scale-Index-Base) byte for complex indexing
-    if (rm == 4) {
-        uint8_t sib = *ptr++;
-        uint8_t ss = sib >> 6;
-        uint8_t index = (sib >> 3) & 7;
-        uint8_t base = sib & 7;
-        
-        // Translate base and index registers, extending indices if REX prefix is present
-        uint8_t base_reg = base;
-        if (has_rex && (rex & 1)) base_reg += 8; // REX.B bit extends base register index
-        
-        uint8_t index_reg = index;
-        if (has_rex && (rex & 2)) index_reg += 8; // REX.X bit extends index register index
-        
-        // Base == 5 with Mod == 0 indicates no base register, only a 32-bit displacement
-        if (base == 5 && mod == 0) {
-            int32_t disp32;
-            memcpy(&disp32, ptr, 4);
-            ptr += 4;
-            disp = disp32;
-        } else {
-            base_val = get_register_val(uc, base_reg);
-        }
-        
-        // Index == 4 indicates index register is omitted (ESP/RSP cannot be used as an index)
-        if (index != 4) {
-            index_val = get_register_val(uc, index_reg);
-            scale = ss;
-        }
-    } else {
-        // No SIB byte: Rm specifies the base register directly
-        uint8_t base_reg = rm;
-        if (has_rex && (rex & 1)) base_reg += 8; // REX.B bit extends base register index
-        base_val = get_register_val(uc, base_reg);
-    }
-    
-    // Handle displacements: Mod == 1 (8-bit signed displacement), Mod == 2 (32-bit signed displacement)
-    if (mod == 1) {
-        int8_t disp8 = (int8_t)*ptr++;
-        disp += disp8;
-    } else if (mod == 2) {
-        int32_t disp32;
-        memcpy(&disp32, ptr, 4);
-        ptr += 4;
-        disp += disp32;
-    }
-    
-    // Account for PCLMULQDQ immediate byte suffix in total instruction size
-    int has_imm = (rip[1+has_rex+1] == 0x3a);
-    if (has_imm) {
-        ptr++;
-    }
-    
-    *bytes_consumed = (ptr - rip);
-    return (uint8_t *)(base_val + (index_val << scale) + disp);
-}
-
 struct cache_entry {
     uint64_t rip;
     uint32_t op_type;
@@ -422,8 +334,106 @@ struct cache_entry {
     uint8_t rex;
     uint8_t modrm;
     int bytes_consumed;
+    
+    // Cache memory address resolution fields
+    uint8_t is_rip_relative;
+    uint8_t base_reg_idx;   // 255 if none
+    uint8_t index_reg_idx;  // 255 if none
+    uint8_t scale;
+    int32_t displacement;
+    
     uint32_t seq;
 };
+
+static void parse_mem_operand(uint8_t *rip, int has_rex, uint8_t rex, uint8_t modrm, struct cache_entry *entry) {
+    uint8_t mod = modrm >> 6;
+    uint8_t rm = modrm & 7;
+    uint8_t *ptr = rip + 1 + has_rex + 3; // past prefix(0x66) + REX + Opcode(3 bytes)
+    
+    entry->is_rip_relative = 0;
+    entry->base_reg_idx = 255;
+    entry->index_reg_idx = 255;
+    entry->scale = 0;
+    entry->displacement = 0;
+    
+    if (mod == 0 && rm == 5) {
+        int32_t disp32;
+        memcpy(&disp32, ptr, 4);
+        ptr += 4;
+        int has_imm = (rip[1+has_rex+1] == 0x3a);
+        uint8_t *rip_next = ptr + (has_imm ? 1 : 0);
+        entry->is_rip_relative = 1;
+        entry->bytes_consumed = (rip_next - rip);
+        entry->displacement = disp32;
+        return;
+    }
+    
+    if (rm == 4) {
+        uint8_t sib = *ptr++;
+        uint8_t ss = sib >> 6;
+        uint8_t index = (sib >> 3) & 7;
+        uint8_t base = sib & 7;
+        
+        uint8_t base_reg = base;
+        if (has_rex && (rex & 1)) base_reg += 8;
+        
+        uint8_t index_reg = index;
+        if (has_rex && (rex & 2)) index_reg += 8;
+        
+        if (base == 5 && mod == 0) {
+            int32_t disp32;
+            memcpy(&disp32, ptr, 4);
+            ptr += 4;
+            entry->displacement = disp32;
+        } else {
+            entry->base_reg_idx = base_reg;
+        }
+        
+        if (index != 4) {
+            entry->index_reg_idx = index_reg;
+            entry->scale = ss;
+        }
+    } else {
+        uint8_t base_reg = rm;
+        if (has_rex && (rex & 1)) base_reg += 8;
+        entry->base_reg_idx = base_reg;
+    }
+    
+    if (mod == 1) {
+        int8_t disp8 = (int8_t)*ptr++;
+        entry->displacement += disp8;
+    } else if (mod == 2) {
+        int32_t disp32;
+        memcpy(&disp32, ptr, 4);
+        ptr += 4;
+        entry->displacement += disp32;
+    }
+    
+    int has_imm = (rip[1+has_rex+1] == 0x3a);
+    if (has_imm) {
+        ptr++;
+    }
+    
+    entry->bytes_consumed = (ptr - rip);
+}
+
+static inline uint8_t *resolve_mem_addr_fast(ucontext_t *uc, uint8_t *rip, int bytes_consumed, int is_rip_relative, uint8_t base_reg_idx, uint8_t index_reg_idx, uint8_t scale, int32_t displacement) {
+    if (is_rip_relative) {
+        return rip + bytes_consumed + displacement;
+    }
+    
+    uint64_t base_val = 0;
+    if (base_reg_idx != 255) {
+        base_val = get_register_val(uc, base_reg_idx);
+    }
+    
+    uint64_t index_val = 0;
+    if (index_reg_idx != 255) {
+        index_val = get_register_val(uc, index_reg_idx);
+    }
+    
+    return (uint8_t *)(base_val + (index_val << scale) + displacement);
+}
 
 #define CACHE_SIZE 1024
 static struct cache_entry rip_cache[CACHE_SIZE];
@@ -476,74 +486,22 @@ static uint64_t get_register_val_trampoline(uint64_t *gp_regs, int reg_idx, uint
     return gp_regs[gp_map[reg_idx]];
 }
 
-static uint8_t *resolve_mem_addr_trampoline(uint64_t *gp_regs, uintptr_t original_rsp, uint8_t *rip, int has_rex, uint8_t rex, uint8_t modrm, int *bytes_consumed) {
-    uint8_t mod = modrm >> 6;
-    uint8_t rm = modrm & 7;
-    uint8_t *ptr = rip + 1 + has_rex + 3;
+static inline uint8_t *resolve_mem_addr_fast_trampoline(uint64_t *gp_regs, uintptr_t original_rsp, uint8_t *rip, struct cache_entry *entry) {
+    if (entry->is_rip_relative) {
+        return rip + entry->bytes_consumed + entry->displacement;
+    }
     
     uint64_t base_val = 0;
+    if (entry->base_reg_idx != 255) {
+        base_val = get_register_val_trampoline(gp_regs, entry->base_reg_idx, original_rsp);
+    }
+    
     uint64_t index_val = 0;
-    int scale = 0;
-    int32_t disp = 0;
-    
-    if (mod == 0 && rm == 5) {
-        int32_t disp32;
-        memcpy(&disp32, ptr, 4);
-        ptr += 4;
-        int has_imm = (rip[1+has_rex+1] == 0x3a);
-        uint8_t *rip_next = ptr + (has_imm ? 1 : 0);
-        *bytes_consumed = (rip_next - rip);
-        return rip_next + disp32;
+    if (entry->index_reg_idx != 255) {
+        index_val = get_register_val_trampoline(gp_regs, entry->index_reg_idx, original_rsp);
     }
     
-    if (rm == 4) {
-        uint8_t sib = *ptr++;
-        uint8_t ss = sib >> 6;
-        uint8_t index = (sib >> 3) & 7;
-        uint8_t base = sib & 7;
-        
-        uint8_t base_reg = base;
-        if (has_rex && (rex & 1)) base_reg += 8;
-        
-        uint8_t index_reg = index;
-        if (has_rex && (rex & 2)) index_reg += 8;
-        
-        if (base == 5 && mod == 0) {
-            int32_t disp32;
-            memcpy(&disp32, ptr, 4);
-            ptr += 4;
-            disp = disp32;
-        } else {
-            base_val = get_register_val_trampoline(gp_regs, base_reg, original_rsp);
-        }
-        
-        if (index != 4) {
-            index_val = get_register_val_trampoline(gp_regs, index_reg, original_rsp);
-            scale = ss;
-        }
-    } else {
-        uint8_t base_reg = rm;
-        if (has_rex && (rex & 1)) base_reg += 8;
-        base_val = get_register_val_trampoline(gp_regs, base_reg, original_rsp);
-    }
-    
-    if (mod == 1) {
-        int8_t disp8 = (int8_t)*ptr++;
-        disp += disp8;
-    } else if (mod == 2) {
-        int32_t disp32;
-        memcpy(&disp32, ptr, 4);
-        ptr += 4;
-        disp += disp32;
-    }
-    
-    int has_imm = (rip[1+has_rex+1] == 0x3a);
-    if (has_imm) {
-        ptr++;
-    }
-    
-    *bytes_consumed = (ptr - rip);
-    return (uint8_t *)(base_val + (index_val << scale) + disp);
+    return (uint8_t *)(base_val + (index_val << entry->scale) + entry->displacement);
 }
 
 static struct cache_entry *find_cache_entry_by_ret_addr(uintptr_t ret_addr) {
@@ -648,9 +606,8 @@ void trampoline_c_helper(uint64_t *gp_regs, uint8_t *xmm_regs, uintptr_t ret_add
     if (entry->op_type == 0xde || entry->op_type == 0xdf || entry->op_type == 0xdb || entry->op_type == 0xdc || entry->op_type == 0xdd) {
         uint8_t *src;
         if (entry->is_mem) {
-            int dummy_bytes_consumed;
             uintptr_t original_rsp = (uintptr_t)gp_regs + 128;
-            src = resolve_mem_addr_trampoline(gp_regs, original_rsp, rip, entry->has_rex, entry->rex, entry->modrm, &dummy_bytes_consumed);
+            src = resolve_mem_addr_fast_trampoline(gp_regs, original_rsp, rip, entry);
         } else {
             src = &xmm_regs[entry->rm_idx * 16];
         }
@@ -664,9 +621,8 @@ void trampoline_c_helper(uint64_t *gp_regs, uint8_t *xmm_regs, uintptr_t ret_add
         uint8_t *src;
         uint8_t imm;
         if (entry->is_mem) {
-            int dummy_bytes_consumed;
             uintptr_t original_rsp = (uintptr_t)gp_regs + 128;
-            src = resolve_mem_addr_trampoline(gp_regs, original_rsp, rip, entry->has_rex, entry->rex, entry->modrm, &dummy_bytes_consumed);
+            src = resolve_mem_addr_fast_trampoline(gp_regs, original_rsp, rip, entry);
             imm = rip[entry->bytes_consumed - 1];
         } else {
             src = &xmm_regs[entry->rm_idx * 16];
@@ -775,8 +731,13 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
     uint32_t seq1, seq2;
     uint64_t entry_rip;
     uint32_t cached_op_type = 0;
-    uint8_t cached_reg_idx = 0, cached_rm_idx = 0, cached_is_mem = 0, cached_has_rex = 0, cached_rex = 0, cached_modrm = 0;
+    uint8_t cached_reg_idx = 0, cached_rm_idx = 0, cached_is_mem = 0, cached_has_rex = 0;
     int cached_bytes_consumed = 0;
+    uint8_t cached_is_rip_relative = 0;
+    uint8_t cached_base_reg_idx = 255;
+    uint8_t cached_index_reg_idx = 255;
+    uint8_t cached_scale = 0;
+    int32_t cached_displacement = 0;
     int cache_hit = 0;
     
     for (int retry = 0; retry < 3; retry++) {
@@ -789,9 +750,12 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
         cached_rm_idx = entry->rm_idx;
         cached_is_mem = entry->is_mem;
         cached_has_rex = entry->has_rex;
-        cached_rex = entry->rex;
-        cached_modrm = entry->modrm;
         cached_bytes_consumed = entry->bytes_consumed;
+        cached_is_rip_relative = entry->is_rip_relative;
+        cached_base_reg_idx = entry->base_reg_idx;
+        cached_index_reg_idx = entry->index_reg_idx;
+        cached_scale = entry->scale;
+        cached_displacement = entry->displacement;
         
         seq2 = __atomic_load_n(&entry->seq, __ATOMIC_ACQUIRE);
         if (seq1 == seq2) {
@@ -807,8 +771,7 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
         if (cached_op_type == 0xde || cached_op_type == 0xdf || cached_op_type == 0xdb || cached_op_type == 0xdc || cached_op_type == 0xdd) {
             uint8_t *src;
             if (cached_is_mem) {
-                int dummy_bytes_consumed;
-                src = resolve_mem_addr(uc, rip, cached_has_rex, cached_rex, cached_modrm, &dummy_bytes_consumed);
+                src = resolve_mem_addr_fast(uc, rip, cached_bytes_consumed, cached_is_rip_relative, cached_base_reg_idx, cached_index_reg_idx, cached_scale, cached_displacement);
             } else {
                 src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[cached_rm_idx];
             }
@@ -829,8 +792,7 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
             uint8_t *src;
             uint8_t imm;
             if (cached_is_mem) {
-                int dummy_bytes_consumed;
-                src = resolve_mem_addr(uc, rip, cached_has_rex, cached_rex, cached_modrm, &dummy_bytes_consumed);
+                src = resolve_mem_addr_fast(uc, rip, cached_bytes_consumed, cached_is_rip_relative, cached_base_reg_idx, cached_index_reg_idx, cached_scale, cached_displacement);
                 imm = rip[cached_bytes_consumed - 1];
             } else {
                 src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[cached_rm_idx];
@@ -910,6 +872,11 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 entry->rex = rex;
                 entry->modrm = modrm;
                 entry->bytes_consumed = bytes_consumed;
+                entry->is_rip_relative = 0;
+                entry->base_reg_idx = 255;
+                entry->index_reg_idx = 255;
+                entry->scale = 0;
+                entry->displacement = 0;
                 __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
                 
                 // Patch the instruction site to call the trampoline island stub
@@ -920,8 +887,21 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 return;
             } else {
                 // Register-to-memory operation: resolve the target effective memory address
-                int bytes_consumed = 0;
-                uint8_t *src = resolve_mem_addr(uc, rip, has_rex, rex, modrm, &bytes_consumed);
+                // We parse details directly into the cache entry first, then read from it to resolve the memory target
+                uint32_t seq_val = __atomic_load_n(&entry->seq, __ATOMIC_RELAXED);
+                __atomic_store_n(&entry->seq, seq_val + 1, __ATOMIC_RELEASE);
+                entry->rip = (uint64_t)rip;
+                entry->op_type = op_type;
+                entry->reg_idx = reg_idx;
+                entry->rm_idx = 0;
+                entry->is_mem = 1;
+                entry->has_rex = has_rex;
+                entry->rex = rex;
+                entry->modrm = modrm;
+                parse_mem_operand(rip, has_rex, rex, modrm, entry);
+                __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
+                
+                uint8_t *src = resolve_mem_addr_fast(uc, rip, entry->bytes_consumed, entry->is_rip_relative, entry->base_reg_idx, entry->index_reg_idx, entry->scale, entry->displacement);
                 
                 if (debug_emu) {
                     log_emu_aes(op_type, reg_idx, 99); // 99 represents memory operand
@@ -933,25 +913,11 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 else if (op_type == 0xdc) emulate_aesenc(dest, src);
                 else if (op_type == 0xdd) emulate_aesenclast(dest, src);
                 
-                // Write to cache
-                uint32_t seq_val = __atomic_load_n(&entry->seq, __ATOMIC_RELAXED);
-                __atomic_store_n(&entry->seq, seq_val + 1, __ATOMIC_RELEASE);
-                entry->rip = (uint64_t)rip;
-                entry->op_type = op_type;
-                entry->reg_idx = reg_idx;
-                entry->rm_idx = 0;
-                entry->is_mem = 1;
-                entry->has_rex = has_rex;
-                entry->rex = rex;
-                entry->modrm = modrm;
-                entry->bytes_consumed = bytes_consumed;
-                __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
-                
                 // Patch the instruction site to call the trampoline island stub
-                patch_code(rip, bytes_consumed);
+                patch_code(rip, entry->bytes_consumed);
                 
                 // Skip the executed instruction by the calculated byte length
-                uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
+                uc->uc_mcontext.gregs[REG_RIP] += entry->bytes_consumed;
                 return;
             }
         } else if (opcode[0] == 0x0f && opcode[1] == 0x3a && opcode[2] == 0x44) {
@@ -993,6 +959,11 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 entry->rex = rex;
                 entry->modrm = modrm;
                 entry->bytes_consumed = bytes_consumed;
+                entry->is_rip_relative = 0;
+                entry->base_reg_idx = 255;
+                entry->index_reg_idx = 255;
+                entry->scale = 0;
+                entry->displacement = 0;
                 __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
                 
                 // Patch the instruction site to call the trampoline island stub
@@ -1002,17 +973,8 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
                 return;
             } else {
-                int bytes_consumed = 0;
-                uint8_t *src = resolve_mem_addr(uc, rip, has_rex, rex, modrm, &bytes_consumed);
-                uint8_t imm = rip[bytes_consumed - 1]; // Immediate byte is at the end of instruction
-                
-                if (debug_emu) {
-                    log_emu_pclmul(reg_idx, 99, imm);
-                }
-                
-                emulate_pclmulqdq(dest, src, imm);
-                
-                // Write to cache
+                // Register-to-memory operation: resolve the target effective memory address
+                // We parse details directly into the cache entry first, then read from it to resolve the memory target
                 uint32_t seq_val = __atomic_load_n(&entry->seq, __ATOMIC_RELAXED);
                 __atomic_store_n(&entry->seq, seq_val + 1, __ATOMIC_RELEASE);
                 entry->rip = (uint64_t)rip;
@@ -1023,14 +985,23 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 entry->has_rex = has_rex;
                 entry->rex = rex;
                 entry->modrm = modrm;
-                entry->bytes_consumed = bytes_consumed;
+                parse_mem_operand(rip, has_rex, rex, modrm, entry);
                 __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
                 
+                uint8_t *src = resolve_mem_addr_fast(uc, rip, entry->bytes_consumed, entry->is_rip_relative, entry->base_reg_idx, entry->index_reg_idx, entry->scale, entry->displacement);
+                uint8_t imm = rip[entry->bytes_consumed - 1]; // Immediate byte is at the end of instruction
+                
+                if (debug_emu) {
+                    log_emu_pclmul(reg_idx, 99, imm);
+                }
+                
+                emulate_pclmulqdq(dest, src, imm);
+                
                 // Patch the instruction site to call the trampoline island stub
-                patch_code(rip, bytes_consumed);
+                patch_code(rip, entry->bytes_consumed);
                 
                 // Skip instruction by the calculated byte length
-                uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
+                uc->uc_mcontext.gregs[REG_RIP] += entry->bytes_consumed;
                 return;
             }
         }
