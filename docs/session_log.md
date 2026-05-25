@@ -156,4 +156,18 @@ Below is the chronological log of engineering sprints, including precise commit 
     *   Presents a beautifully formatted ASCII comparison table compiling elapsed time, traps per second, and avg latency directly to the developer at run time.
 *   **Code Reference**: [benchmark/benchmark.c](file:///home/michael/src/agy-compat-toolkit/benchmark/benchmark.c)
 
+---
+
+## 🌟 Security Analysis: SELinux & AppArmor Compliance
+
+*   **Context**: Explored options to make Option B (Experimental JIT Mode) run under strict security configurations (W^X-enforced sandboxes).
+*   **Engineering Verification**:
+    1.  **`/proc/self/mem` writing**: Verified that writing directly to memory through `/proc/self/mem` successfully patches read-only executable instructions without calling `mprotect` or triggering MMU-level page table transitions.
+    2.  **`memfd_create` Dual-Mapping**: Verified that JIT trampoline execution is possible by dual-mapping an anonymous shared memory descriptor once as writable (`PROT_READ | PROT_WRITE`) and once as executable (`PROT_READ | PROT_EXEC`).
+*   **Hardening Realities**:
+    *   **AppArmor** profiles in production (Docker, Kubernetes, systemd) explicitly block process memory writing (`deny @{PROC}/[0-9]*/mem rwklx,`), which instantly fails `/proc/self/mem` writes with `EACCES`.
+    *   **SELinux** policies block execution of anonymous memory mapped with `PROT_EXEC` (the `execmem` boolean set to `false`), preventing dual-mapped mappings from executing unless they are backed by a labeled binary on disk.
+*   **Design Decision**:
+    *   Confirmed that Option A (Safe Mode) remains the **only secure, architecturally compliant path** for strict sandboxes since it uses standard library files loaded by `ld.so` and relies purely on kernel-delivered `SIGILL` signals without runtime code modification.
+
 

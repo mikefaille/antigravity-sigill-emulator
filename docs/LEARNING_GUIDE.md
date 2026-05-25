@@ -287,6 +287,52 @@ This combination of split-jumps, atomic swaps, and lock-free trap retries yields
 
 ---
 
+## 🧠 Advanced Concept: W^X Compliance and Mandatory Access Control (SELinux & AppArmor)
+
+When deploying compatibility tools in production, they are subject to operating system and kernel security policies. Dynamic code modification (JIT patching used in Option B) creates security challenges under strict policies.
+
+### 1. Write XOR Execute (W^X) Compliance
+W^X is a fundamental security policy enforced at the CPU and MMU level. It dictates that virtual memory pages must be:
+- **Writable** (so programs can write data to them), OR
+- **Executable** (so the CPU can execute code in them),
+- But **never both simultaneously**.
+
+#### How Option B (Experimental Mode) violates raw W^X:
+To patch instructions in-place, Option B changes the target code page from read-executable (`PROT_READ | PROT_EXEC`) to writable (`PROT_READ | PROT_WRITE | PROT_EXEC`), overwrites the instruction, and changes it back. This temporary combination is heavily monitored and blocked by security modules.
+
+#### Secure W^X-Compliant Patching: `/proc/self/mem`
+Instead of using `mprotect` to change memory page permissions, code can be patched by opening `/proc/self/mem` and writing directly to the offset matching the instruction's virtual address:
+```c
+int fd = open("/proc/self/mem", O_RDWR);
+pwrite(fd, patch_bytes, size, target_address);
+```
+Under standard Linux, writing to `/proc/self/mem` bypasses the virtual memory table write protection. The page permissions remain `PROT_READ | PROT_EXEC` in the page table at all times, making this write fully W^X compliant since the writeable bit is never exposed in user-space mappings.
+
+### 2. Mandatory Access Control (MAC) Constraints
+
+While `/proc/self/mem` satisfies hardware-level W^X checks, **strict Mandatory Access Control (MAC)** profiles enforced by SELinux and AppArmor will block it.
+
+#### SELinux constraints:
+1. **`execmem` block**: Hardened SELinux profiles set `execmem` to `false` by default. This blocks a process from making any anonymous memory page executable, which neutralizes the JIT Trampoline Island pages allocated by Option B.
+2. **`memfd_create` Dual-Mapping**: To bypass `execmem` for JITs, compilers use **Dual-Mapping (Alias Mapping)**. They map an anonymous in-memory file descriptor twice: once as `PROT_READ | PROT_WRITE` (to compile code) and once as `PROT_READ | PROT_EXEC` (to execute code). No page is ever writable and executable simultaneously. However, under strict SELinux rules, mapping any memory-backed file as executable is still blocked if the process lacks the `execmem` privilege.
+
+#### AppArmor constraints:
+AppArmor profiles in secure environments (like systemd units, Docker containers, or LXD sandboxes) almost universally deny all access to process memory:
+```apparmor
+deny @{PROC}/[0-9]*/mem rwklx,
+```
+This rule intercepts the `open()` call to `/proc/self/mem` and returns a `Permission Denied` (`EACCES`) error, causing any in-place patching attempt to crash.
+
+### 3. Why Option A (Safe Mode) is the Secure Standard
+
+Because Option B's JIT compiling and memory-patching techniques are incompatible with strict MAC security, **Option A (Safe Mode) remains the industry standard for hardened environments**:
+
+*   **No runtime memory modification**: It does not allocate any JIT pages or write to `/proc/self/mem`.
+*   **Static Executable Labeling**: The signal handler runs inside the static dynamic library `sigill_emulator.so` loaded by the standard operating system loader (`ld.so`) at startup. The library file is labeled on disk (e.g. as `lib_t`), allowing SELinux to approve its execution.
+*   **Pure Exception Trapping**: It relies entirely on standard `SIGILL` signals delivered by the kernel, making it safe for all hardened cloud, sandboxed, and VM workloads.
+
+---
+
 ## 💻 Hacking Exercise 1: Add a Dummy Instruction to the Emulator
 Let's practice extending the emulator. We will register a dummy instruction that prints a greeting whenever executed, rather than crashing the program.
 
