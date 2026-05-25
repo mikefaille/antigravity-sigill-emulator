@@ -316,6 +316,22 @@ static void log_emu_pclmul(uint8_t dest, uint8_t src, uint8_t imm) {
     (void)rc;
 }
 
+/*
+ * Maps the 4-bit x86-64 ISA instruction register index to the Linux kernel ABI
+ * signal context register offset (`ucontext_t`'s `gregs` array offsets).
+ * 
+ * In the x86-64 Instruction Set Architecture (ISA), registers are encoded in opcodes as:
+ *   0: RAX, 1: RCX, 2: RDX, 3: RBX, 4: RSP, 5: RBP, 6: RSI, 7: RDI,
+ *   8: R8,  9: R9,  10: R10, 11: R11, 12: R12, 13: R13, 14: R14, 15: R15
+ * See: https://en.wikipedia.org/wiki/ModR/M
+ *
+ * However, the Linux kernel context-switch saves registers in `ucontext_t`'s `gregs` array
+ * in a different layout defined by the System V AMD64 ABI:
+ *   RAX is gregs[REG_RAX] (which is index 13), RCX is gregs[REG_RCX] (which is index 14), etc.
+ * See: https://en.wikipedia.org/wiki/X86_calling_conventions#System_V_AMD64_ABI
+ * 
+ * This static lookup map translates the ISA index (0-15) directly to the ABI index.
+ */
 static uint64_t get_register_val(ucontext_t *uc, int reg_idx) {
     static const int reg_map[16] = {
         REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
@@ -477,10 +493,38 @@ static void *allocate_trampoline_island(uint8_t *rip) {
     return NULL;
 }
 
+/*
+ * Resolves register values inside the JIT trampoline helper (`trampoline_c_helper`).
+ * 
+ * Because `trampoline_entry` pushes all 15 general-purpose registers onto the stack
+ * before executing, the stack grows downwards. The `gp_regs` pointer points to the 
+ * top of the stack (which is R15, index 0 in the array), and RAX is at the bottom 
+ * (index 14 in the array).
+ * 
+ * Stack Layout mapping of pushed registers:
+ *   gp_regs[0]  -> R15 (ISA Index 15)
+ *   gp_regs[1]  -> R14 (ISA Index 14)
+ *   gp_regs[2]  -> R13 (ISA Index 13)
+ *   gp_regs[3]  -> R12 (ISA Index 12)
+ *   gp_regs[4]  -> R11 (ISA Index 11)
+ *   gp_regs[5]  -> R10 (ISA Index 10)
+ *   gp_regs[6]  -> R9  (ISA Index 9)
+ *   gp_regs[7]  -> R8  (ISA Index 8)
+ *   gp_regs[8]  -> RBP (ISA Index 5)
+ *   gp_regs[9]  -> RDI (ISA Index 7)
+ *   gp_regs[10] -> RSI (ISA Index 6)
+ *   gp_regs[11] -> RBX (ISA Index 3)
+ *   gp_regs[12] -> RDX (ISA Index 2)
+ *   gp_regs[13] -> RCX (ISA Index 1)
+ *   gp_regs[14] -> RAX (ISA Index 0)
+ *   RSP (ISA Index 4) -> Handled separately via `original_rsp`
+ * 
+ * This map translates the x86-64 ISA register index (0-15) directly to the stack index.
+ */
 static uint64_t get_register_val_trampoline(uint64_t *gp_regs, int reg_idx, uintptr_t original_rsp) {
     static const int gp_map[16] = {
-        14, 13, 12, 11, -1, 8, 10, 9,
-        7,  6,  5,  4,  3,  2,  1,  0
+        14, 13, 12, 11, -1, 8, 10, 9, // gp_map[0]=RAX(14), gp_map[1]=RCX(13), gp_map[2]=RDX(12), gp_map[3]=RBX(11), gp_map[4]=RSP(-1), gp_map[5]=RBP(8), gp_map[6]=RSI(10), gp_map[7]=RDI(9)
+        7,  6,  5,  4,  3,  2,  1,  0  // gp_map[8]=R8(7), gp_map[9]=R9(6), gp_map[10]=R10(5), gp_map[11]=R11(4), gp_map[12]=R12(3), gp_map[13]=R13(2), gp_map[14]=R14(1), gp_map[15]=R15(0)
     };
     if (reg_idx == 4) return original_rsp;
     return gp_regs[gp_map[reg_idx]];
@@ -683,17 +727,43 @@ static void patch_code(uint8_t *rip, int bytes_consumed) {
         return;
     }
     
+    /*
+     * 1. Calculate relative target call offset.
+     * In x86-64, the displacement for the relative call instruction (`call rel32` / opcode `0xE8`)
+     * is relative to the address of the *next* instruction. Since a `call rel32` instruction
+     * is exactly 5 bytes, the next instruction is at `RIP + 5`.
+     * Offset = TargetAddress - (RIP + 5).
+     * See: https://en.wikipedia.org/wiki/Program_counter#x86
+     */
     int32_t call_offset = (int32_t)((uintptr_t)stub - ((uintptr_t)rip + 5));
     
+    /*
+     * 2. Atomic Overwrite sequence via the INT3 (0xCC) Trap-Spin protocol:
+     * Overwriting instruction bytes across multiple threads is risky; if a thread executes
+     * a partially written instruction, it will execute corrupt machine code and crash.
+     * To prevent this, we write the 1-byte INT3 opcode (`0xCC`) to the first byte of `RIP`.
+     * This is atomic since a write of a single byte is always atomic.
+     * See: https://en.wikipedia.org/wiki/INT_(x86)#INT_3
+     */
     rip[0] = 0xCC; // INT3
     __builtin___clear_cache((char *)rip, (char *)rip + 1);
     
+    /*
+     * Any concurrent thread hitting `0xCC` now raises `SIGTRAP`. Our SIGTRAP handler
+     * simply spins/returns immediately, causing the thread to wait and retry.
+     * Now we can safely write the rest of the 5-byte relative offset and NOP padding (0x90).
+     */
     memcpy(rip + 1, &call_offset, 4);
     
     for (int i = 5; i < bytes_consumed; i++) {
-        rip[i] = 0x90; // NOP
+        rip[i] = 0x90; // NOP (No-Operation) padding to cover original instruction boundary
     }
     
+    /*
+     * 3. Finally, atomically swap `0xCC` with `0xE8` (relative call).
+     * Subsequent threads will execute `0xE8` and call the JIT trampoline directly without any traps.
+     * Any thread waiting in SIGTRAP will resume and execute the newly completed `0xE8` call.
+     */
     rip[0] = 0xE8; // call
     
     __builtin___clear_cache((char *)rip, (char *)rip + bytes_consumed);
