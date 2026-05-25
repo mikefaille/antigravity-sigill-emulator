@@ -333,6 +333,43 @@ Because Option B's JIT compiling and memory-patching techniques are incompatible
 
 ---
 
+## 🧠 Advanced Concept: Graceful Degradation & Unidirectional Fallback
+
+To prevent security policy or resource execution limits from causing a fatal crash, the emulator implements a **unidirectional fallback and graceful degradation** architecture.
+
+### 1. The Failsafe Hierarchy
+The modes are organized hierarchically without cyclic dependency (avoiding infinite loops):
+
+```text
+       [Application starts in Option B]
+                      |
+                      v
+            Try JIT Code Patching
+                      |
+            +---------+---------+
+            |                   |
+         Succeeds             Fails (e.g. SELinux block, out of memory)
+            |                   |
+            v                   v
+      Direct JIT Execution    Fallback to Option A (Trap-and-Emulate)
+                                |
+                                v
+                           Execute via Software Math
+```
+
+If the JIT engine fails at any stage (e.g. unable to allocate a JIT Trampoline Island page, unable to open `/proc/self/mem` due to AppArmor, or failed `mprotect` call), it immediately aborts patching, leaves the code intact, and delegates to the Option A software emulator.
+
+### 2. Per-Instruction Granularity
+Rather than aborting the entire process, the fallback operates on a **per-instruction basis**. If the emulator successfully patches 9 out of 10 instructions but fails to patch the 10th (e.g. due to page boundaries or memory locks), the 9 patched sites execute at direct hardware speed, while the 10th site seamlessly degrades to software emulation.
+
+### 3. Option A Immunity to Resource Exhaustion
+Option A acts as the absolute floor of the system because it is designed to be **immune to resource exhaustion**:
+*   **No Dynamic Memory Allocations**: It never calls `malloc()`, `mmap()`, or `memfd_create()` at runtime.
+*   **Static Memory Footprint**: The direct-mapped Seqlock cache table is allocated statically inside the library's data segment at load time, taking a fixed **56 KB** of RAM.
+*   **Cache Eviction instead of Out of Memory**: If multiple thread targets collide in the cache index, old metadata entries are overwritten (evicted) using lock-free atomic sequence numbers. There is no failure condition or memory leak associated with the cache filling up.
+
+---
+
 ## 💻 Hacking Exercise 1: Add a Dummy Instruction to the Emulator
 Let's practice extending the emulator. We will register a dummy instruction that prints a greeting whenever executed, rather than crashing the program.
 

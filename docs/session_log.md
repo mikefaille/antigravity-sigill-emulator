@@ -170,4 +170,17 @@ Below is the chronological log of engineering sprints, including precise commit 
 *   **Design Decision**:
     *   Confirmed that Option A (Safe Mode) remains the **only secure, architecturally compliant path** for strict sandboxes since it uses standard library files loaded by `ld.so` and relies purely on kernel-delivered `SIGILL` signals without runtime code modification.
 
+---
+
+## 🌟 Fallback Architecture: Graceful Degradation
+
+*   **Hierarchy Design**:
+    *   Implemented a unidirectional fallback pipeline ($\text{Option B} \rightarrow \text{Option A}$). 
+    *   If Option B fails (e.g., due to memory constraints, permission denials, or allocator failures), it aborts patching at that specific instruction location and drops back to Option A (pure software emulation).
+    *   Prevents cyclic loops and ensures failsafe execution on hardened hosts.
+*   **Granularity**:
+    *   Dynamic code patching operates at per-instruction resolution. A patching failure at a specific site does not affect other successfully patched sites.
+*   **Resource Immunity**:
+    *   Option A acts as a bulletproof floor because it relies on static memory allocation (~56 KB) and zero runtime dynamic allocations. Cache line contentions are handled via direct eviction rather than out-of-memory errors, rendering Safe Mode immune to system resource limits.
+
 
