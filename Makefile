@@ -18,8 +18,8 @@ benchmark: benchmark/benchmark.c
 	$(CC) -O2 -o run_benchmark benchmark/benchmark.c
 
 install: $(TARGET)
-	rm -f $(INSTALL_DIR)/$(TARGET)
-	cp $(TARGET) $(INSTALL_DIR)/$(TARGET)
+	cp $(TARGET) $(INSTALL_DIR)/$(TARGET).tmp
+	mv $(INSTALL_DIR)/$(TARGET).tmp $(INSTALL_DIR)/$(TARGET)
 
 release: clean all
 	tar -czf agy-compat-toolkit-$(VERSION).tar.gz $(RELEASE_FILES)
