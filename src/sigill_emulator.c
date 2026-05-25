@@ -11,6 +11,10 @@ static struct sigaction old_sa;
 static int debug_emu = 0;
 
 // AES Tables and S-Box definitions
+// The Rijndael S-box (Substitution-box) is a non-linear byte substitution table used in AES.
+// It is designed to resist linear and differential cryptanalysis by mapping each byte to its
+// multiplicative inverse in GF(2^8), followed by an affine transformation.
+// See: https://en.wikipedia.org/wiki/Rijndael_S-box
 static const uint8_t sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -51,11 +55,20 @@ static const uint8_t inv_sbox[256] = {
 
 /*
  * Galois Field GF(2^8) arithmetic helpers.
- * In GF(2^8), addition is represented by bitwise XOR.
- * Multiplication by 2 (gmul2) shifts the byte left by 1 bit. If the high bit was set
- * (representing a value >= 128), we reduce it by XORing with the AES polynomial 0x1B.
- * We make this operation branchless by using an arithmetic shift right by 7 on a signed 8-bit integer
- * to create a bitmask (0xFF if high bit is set, 0x00 if not) and bitwise-ANDing it with 0x1B.
+ * AES uses the finite field GF(2^8) with the irreducible polynomial:
+ *   x^8 + x^4 + x^3 + x + 1 (represented in hexadecimal as 0x1B, with the x^8 bit omitted).
+ * See: https://en.wikipedia.org/wiki/Finite_field_arithmetic
+ * 
+ * In GF(2^8), addition is represented by a simple bitwise XOR.
+ * Multiplication by 2 (gmul2) shifts the byte left by 1 bit. If the high bit of x was set
+ * before shifting (indicating overflow of x^7), we reduce the result by XORing with 0x1B.
+ * 
+ * We make gmul2 branchless:
+ * 1. (int8_t)x >> 7: A signed 8-bit arithmetic shift right replicates the MSB across all 8 bits.
+ *    - If MSB is 1: results in 0xFF (all 1s).
+ *    - If MSB is 0: results in 0x00 (all 0s).
+ * 2. (((int8_t)x >> 7) & 0x1B): Masks the irreducible polynomial to 0x1B or 0x00.
+ * 3. XORing this mask with (x << 1) yields the branchless modulo multiplication.
  */
 static inline uint8_t gmul2(uint8_t x) {
     return (x << 1) ^ (((int8_t)x >> 7) & 0x1B);
@@ -125,19 +138,38 @@ static void inv_mix_columns(uint8_t *state) {
     }
 }
 
+/*
+ * Shifts the rows of the AES state.
+ * In AES, the 16-byte state is treated as a 4x4 matrix stored in column-major order:
+ *   [ state[0]  state[4]  state[8]   state[12] ]  <- Row 0 (no shift)
+ *   [ state[1]  state[5]  state[9]   state[13] ]  <- Row 1 (shift left 1)
+ *   [ state[2]  state[6]  state[10]  state[14] ]  <- Row 2 (shift left 2)
+ *   [ state[3]  state[7]  state[11]  state[15] ]  <- Row 3 (shift left 3)
+ * See: https://en.wikipedia.org/wiki/Advanced_Encryption_Standard#The_ShiftRows_step
+ */
 static void shift_rows(uint8_t *state) {
     uint8_t tmp;
+    // Row 1: Shift left by 1 column
     tmp = state[1]; state[1] = state[5]; state[5] = state[9]; state[9] = state[13]; state[13] = tmp;
+    // Row 2: Shift left by 2 columns (swap columns 0<->2 and 1<->3)
     tmp = state[2]; state[2] = state[10]; state[10] = tmp;
     tmp = state[6]; state[6] = state[14]; state[14] = tmp;
+    // Row 3: Shift left by 3 columns (equivalent to shifting right by 1)
     tmp = state[15]; state[15] = state[11]; state[11] = state[7]; state[7] = state[3]; state[3] = tmp;
 }
 
+/*
+ * Inverse ShiftRows.
+ * Row 1 is shifted right by 1, Row 2 by 2, and Row 3 by 3 columns.
+ */
 static void inv_shift_rows(uint8_t *state) {
     uint8_t tmp;
+    // Row 1: Shift right by 1 column
     tmp = state[13]; state[13] = state[9]; state[9] = state[5]; state[5] = state[1]; state[1] = tmp;
+    // Row 2: Shift right by 2 columns
     tmp = state[2]; state[2] = state[10]; state[10] = tmp;
     tmp = state[6]; state[6] = state[14]; state[14] = tmp;
+    // Row 3: Shift right by 3 columns (equivalent to shifting left by 1)
     tmp = state[3]; state[3] = state[7]; state[7] = state[11]; state[11] = state[15]; state[15] = tmp;
 }
 
@@ -192,10 +224,18 @@ static void emulate_aesimc(uint8_t *dest, const uint8_t *src) {
 
 /*
  * Emulates the PCLMULQDQ instruction (Carry-Less Multiplication of Quadwords).
- * This multiplies two 64-bit values (low or high halves of dest and src XMM registers,
- * chosen by the immediate byte imm) using carry-less multiplication (XOR instead of addition).
- * We optimize this loop by shifting temp_b and exiting early when temp_b reaches 0,
- * which significantly reduces cycles for sparse inputs.
+ * Carry-less multiplication operates like standard binary multiplication, but addition
+ * is performed without carry (using XOR). This is mathematically equivalent to 
+ * polynomial multiplication over GF(2).
+ * See: https://en.wikipedia.org/wiki/CLMUL_instruction_set
+ * 
+ * The immediate byte (imm) selects which 64-bit halves of the 128-bit source and 
+ * destination XMM registers are multiplied:
+ *   - imm & 1  == 1: Selects upper 64-bit of dest (else lower)
+ *   - imm & 16 == 1: Selects upper 64-bit of src (else lower)
+ * 
+ * Optimization: The carry-less multiplication loop shifts temp_b and exits early when
+ * temp_b reaches 0, avoiding 64 full loop iterations for sparse inputs.
  */
 static void emulate_pclmulqdq(uint8_t *dest, const uint8_t *src, uint8_t imm) {
     uint64_t a, b;
@@ -281,39 +321,52 @@ static uint64_t get_register_val(ucontext_t *uc, int reg_idx) {
     return uc->uc_mcontext.gregs[reg_map[reg_idx]];
 }
 
+/*
+ * Resolves the effective memory address for instructions with memory operands.
+ * In x86_64, instruction addressing is defined by ModR/M and SIB bytes:
+ *   - ModR/M Byte: bits [7:6] = Mod (Addressing mode), bits [5:3] = Reg/Opcode, bits [2:0] = R/M
+ *   - SIB (Scale-Index-Base) Byte: bits [7:6] = Scale (0, 1, 2, 3 -> factor 1, 2, 4, 8),
+ *     bits [5:3] = Index register index, bits [2:0] = Base register index.
+ * See: https://en.wikipedia.org/wiki/ModR/M
+ */
 static uint8_t *resolve_mem_addr(ucontext_t *uc, uint8_t *rip, int has_rex, uint8_t rex, uint8_t modrm, int *bytes_consumed) {
     uint8_t mod = modrm >> 6;
     uint8_t rm = modrm & 7;
-    uint8_t *ptr = rip + 1 + has_rex + 3; // pointing to ModRM + 1 (SIB or Displacement or Imm)
+    uint8_t *ptr = rip + 1 + has_rex + 3; // Pointing past: prefix(0x66) + REX + Opcode(3 bytes) to ModR/M+1
     
     uint64_t base_val = 0;
     uint64_t index_val = 0;
     int scale = 0;
     int32_t disp = 0;
     
+    // Mod == 0, R/M == 5 indicates RIP-relative addressing (Base is instruction pointer + displacement)
     if (mod == 0 && rm == 5) {
-        // RIP-relative addressing
         int32_t disp32;
         memcpy(&disp32, ptr, 4);
         ptr += 4;
+        // PCLMULQDQ (opcode 0x3a) includes a 1-byte immediate suffix at the end of the instruction,
+        // which must be accounted for to correctly calculate the next instruction's address (RIP_next).
         int has_imm = (rip[1+has_rex+1] == 0x3a);
         uint8_t *rip_next = ptr + (has_imm ? 1 : 0);
         *bytes_consumed = (rip_next - rip);
         return rip_next + disp32;
     }
     
+    // R/M == 4 indicates the presence of a SIB (Scale-Index-Base) byte for complex indexing
     if (rm == 4) {
         uint8_t sib = *ptr++;
         uint8_t ss = sib >> 6;
         uint8_t index = (sib >> 3) & 7;
         uint8_t base = sib & 7;
         
+        // Translate base and index registers, extending indices if REX prefix is present
         uint8_t base_reg = base;
-        if (has_rex && (rex & 1)) base_reg += 8;
+        if (has_rex && (rex & 1)) base_reg += 8; // REX.B bit extends base register index
         
         uint8_t index_reg = index;
-        if (has_rex && (rex & 2)) index_reg += 8;
+        if (has_rex && (rex & 2)) index_reg += 8; // REX.X bit extends index register index
         
+        // Base == 5 with Mod == 0 indicates no base register, only a 32-bit displacement
         if (base == 5 && mod == 0) {
             int32_t disp32;
             memcpy(&disp32, ptr, 4);
@@ -323,16 +376,19 @@ static uint8_t *resolve_mem_addr(ucontext_t *uc, uint8_t *rip, int has_rex, uint
             base_val = get_register_val(uc, base_reg);
         }
         
+        // Index == 4 indicates index register is omitted (ESP/RSP cannot be used as an index)
         if (index != 4) {
             index_val = get_register_val(uc, index_reg);
             scale = ss;
         }
     } else {
+        // No SIB byte: Rm specifies the base register directly
         uint8_t base_reg = rm;
-        if (has_rex && (rex & 1)) base_reg += 8;
+        if (has_rex && (rex & 1)) base_reg += 8; // REX.B bit extends base register index
         base_val = get_register_val(uc, base_reg);
     }
     
+    // Handle displacements: Mod == 1 (8-bit signed displacement), Mod == 2 (32-bit signed displacement)
     if (mod == 1) {
         int8_t disp8 = (int8_t)*ptr++;
         disp += disp8;
@@ -343,6 +399,7 @@ static uint8_t *resolve_mem_addr(ucontext_t *uc, uint8_t *rip, int has_rex, uint
         disp += disp32;
     }
     
+    // Account for PCLMULQDQ immediate byte suffix in total instruction size
     int has_imm = (rip[1+has_rex+1] == 0x3a);
     if (has_imm) {
         ptr++;
@@ -368,12 +425,13 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
     // Get the instruction pointer (RIP) representing where the crash occurred
     uint8_t *rip = (uint8_t *)uc->uc_mcontext.gregs[REG_RIP];
     
-    // 0x66 prefix is used by x86 to indicate an SSE (Streaming SIMD Extensions) instruction
+    // 0x66 operand size override prefix: tells x86 to execute SSE/AVX 128-bit instructions
     if (rip[0] == 0x66) {
         int has_rex = 0;
         uint8_t rex = 0;
         
-        // REX prefix (0x40 to 0x4f) on x86-64 extends register access (e.g. accessing XMM8-XMM15)
+        // REX prefix (0x40 to 0x4f): extends register addressability from XMM0-7 to XMM8-15
+        // See: https://en.wikipedia.org/wiki/X86-64#REX_prefix
         if (rip[1] >= 0x40 && rip[1] <= 0x4f) {
             has_rex = 1;
             rex = rip[1];
@@ -390,18 +448,18 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
             // Extract destination register index from the ModRM byte (bits 3-5)
             uint8_t reg_idx = (modrm >> 3) & 7;
             if (has_rex) {
-                // If REX.R bit (bit 2 of REX prefix) is set, add 8 to register index
+                // REX.R bit (bit 2 of REX prefix / mask 0x04) extends the Reg field of ModRM to access XMM8-15
                 if (rex & 4) reg_idx += 8;
             }
             
             // Get pointer to the destination XMM register in the saved CPU context
             uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
             
-            // If mod field of ModRM byte is 3, it's a register-to-register operation
+            // If mod field of ModRM byte (bits 6-7) is 3, it's a register-to-register operation
             if ((modrm >> 6) == 3) {
                 // Extract source register index from the ModRM byte (bits 0-2)
                 uint8_t rm_idx = modrm & 7;
-                if (has_rex && (rex & 1)) rm_idx += 8; // REX.B bit extends source register index
+                if (has_rex && (rex & 1)) rm_idx += 8; // REX.B bit (bit 0 of REX prefix / mask 0x01) extends the R/M field
                 
                 uint8_t *src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[rm_idx];
                 
@@ -444,7 +502,7 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
             // Extract destination register index from the ModRM byte (bits 3-5)
             uint8_t reg_idx = (modrm >> 3) & 7;
             if (has_rex) {
-                // REX.R bit extends destination register index
+                // REX.R bit (bit 2 of REX prefix / mask 0x04) extends the Reg field to access XMM8-15
                 if (rex & 4) reg_idx += 8;
             }
             uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[reg_idx];
@@ -452,7 +510,7 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
             if ((modrm >> 6) == 3) {
                 uint8_t imm = opcode[4];
                 uint8_t rm_idx = modrm & 7;
-                if (has_rex && (rex & 1)) rm_idx += 8; // REX.B bit extends source register index
+                if (has_rex && (rex & 1)) rm_idx += 8; // REX.B bit (bit 0 of REX prefix / mask 0x01) extends the R/M field
                 
                 uint8_t *src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[rm_idx];
                 
