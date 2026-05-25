@@ -11,6 +11,7 @@
 static struct sigaction old_sa;
 static struct sigaction old_sa_trap;
 static int debug_emu = 0;
+static int emu_mode_experimental = 0;
 
 // AES Tables and S-Box definitions
 // The Rijndael S-box (Substitution-box) is a non-linear byte substitution table used in AES.
@@ -677,6 +678,9 @@ void trampoline_c_helper(uint64_t *gp_regs, uint8_t *xmm_regs, uintptr_t ret_add
 }
 
 static void patch_code(uint8_t *rip, int bytes_consumed) {
+    if (!emu_mode_experimental) {
+        return;
+    }
     if (!island_page) {
         island_page = allocate_trampoline_island(rip);
         if (!island_page) {
@@ -1053,6 +1057,63 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
     _exit(132);
 }
 
+static void check_help(void) {
+    int print_help = 0;
+    
+    char *env_help = getenv("EMU_HELP");
+    if (!env_help) env_help = getenv("HELP");
+    if (env_help && (strcmp(env_help, "1") == 0 || strcmp(env_help, "true") == 0 || strcmp(env_help, "TRUE") == 0)) {
+        print_help = 1;
+    }
+    
+    FILE *f = fopen("/proc/self/cmdline", "r");
+    if (f) {
+        char arg[256];
+        while (1) {
+            int c, i = 0;
+            while ((c = fgetc(f)) != EOF && c != '\0' && i < 255) {
+                arg[i++] = c;
+            }
+            arg[i] = '\0';
+            if (i == 0) break;
+            
+            if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0 || strcmp(arg, "help") == 0 || strcmp(arg, "HELP") == 0) {
+                print_help = 1;
+                break;
+            }
+        }
+        fclose(f);
+    }
+    
+    if (print_help) {
+        const char *help_msg =
+            "========================================================================\n"
+            "                 SIGILL CPU Instruction Emulator Toolkit                \n"
+            "========================================================================\n"
+            "Usage: LD_PRELOAD=/path/to/sigill_emulator.so [ENV_VARS] ./your_program\n\n"
+            "Configuration Environment Variables:\n"
+            "  EMU_MODE=safe|experimental   Choose emulation mode (Default: safe)\n"
+            "  DEBUG_EMU=1                  Enable verbose instruction logging to stderr\n"
+            "  EMU_HELP=1                   Show this help menu and exit\n\n"
+            "Emulation Modes:\n"
+            "  1. Safe Mode (Option A - DEFAULT)\n"
+            "     - Pure software trap-and-emulate logic via SIGILL handlers.\n"
+            "     - Safe for SELinux, AppArmor, containers, and W^X memory policies.\n"
+            "     - Highly optimized with a lock-free direct-mapped Seqlock cache.\n\n"
+            "  2. Experimental Mode (Option B - EMU_MODE=experimental)\n"
+            "     - Dynamically rewrites invalid instruction sites in RAM at runtime.\n"
+            "     - Bypasses kernel signal delivery using 16-byte Trampoline Island stubs.\n"
+            "     - Yields a 10x micro-benchmark speedup (~110 ns vs ~1,650 ns).\n"
+            "     - WARNING: Requires write-executable memory permissions (mprotect).\n"
+            "       Not compatible with strict W^X security layouts or hardened kernels.\n\n"
+            "Learn more on GitHub: https://github.com/mikefaille/antigravity-sigill-emulator\n"
+            "========================================================================\n";
+        ssize_t rc = write(2, help_msg, strlen(help_msg));
+        (void)rc;
+        _exit(0);
+    }
+}
+
 /*
  * Shared library constructor function.
  * This runs when the library is loaded via LD_PRELOAD, before main() of the host program.
@@ -1060,10 +1121,20 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
  */
 __attribute__((constructor))
 static void init(void) {
+    check_help();
+
     // Check if emulation debug tracing is requested
     char *env_dbg = getenv("DEBUG_EMU");
     if (env_dbg && strcmp(env_dbg, "1") == 0) {
         debug_emu = 1;
+    }
+    
+    // Check if experimental mode is requested
+    char *env_mode = getenv("EMU_MODE");
+    char *env_exp = getenv("EMU_EXPERIMENTAL");
+    if ((env_mode && strcmp(env_mode, "experimental") == 0) || 
+        (env_exp && strcmp(env_exp, "1") == 0)) {
+        emu_mode_experimental = 1;
     }
     
     // Register our SIGILL handler while saving the original handler (old_sa) to chain fallback calls
@@ -1076,11 +1147,13 @@ static void init(void) {
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigaction(SIGILL, &sa, &old_sa);
     
-    // Register our SIGTRAP handler for lock-free atomic patching, preserving original handler
-    struct sigaction sa_trap;
-    memset(&sa_trap, 0, sizeof(sa_trap));
-    sa_trap.sa_sigaction = handler;
-    sigemptyset(&sa_trap.sa_mask);
-    sa_trap.sa_flags = SA_SIGINFO | SA_NODEFER;
-    sigaction(SIGTRAP, &sa_trap, &old_sa_trap);
+    if (emu_mode_experimental) {
+        // Register our SIGTRAP handler for lock-free atomic patching, preserving original handler
+        struct sigaction sa_trap;
+        memset(&sa_trap, 0, sizeof(sa_trap));
+        sa_trap.sa_sigaction = handler;
+        sigemptyset(&sa_trap.sa_mask);
+        sa_trap.sa_flags = SA_SIGINFO | SA_NODEFER;
+        sigaction(SIGTRAP, &sa_trap, &old_sa_trap);
+    }
 }
