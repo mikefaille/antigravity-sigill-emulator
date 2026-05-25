@@ -74,6 +74,21 @@ Below is the micro-benchmark comparison:
 
 *Note: The remaining 111.74 ns latency per trap is entirely user-space overhead (trampoline pushes/pops for all XMM and general-purpose registers, direct-mapped cache verification, and SSE mathematical calculations). On all subsequent executions, kernel mode transitions and CPU signal trapping are reduced to exactly **zero**, resulting in virtually 0% kernel CPU utilization under real-world server environments.*
 
+### 5. Compiler Flag Optimization Comparison (O2 vs. O3 + LTO + march=native)
+To assess how much of the performance is derived from high-level compiler optimizations versus algorithmic design, we compiled both runtime modes with two different optimization profiles:
+*   **Standard Profile:** Compiled with `-O2` and generic code generation.
+*   **Optimized Profile:** Compiled with `-O3 -flto -march=native` (tailored specifically for your Intel Xeon CPU).
+
+Below is the micro-benchmark comparison:
+
+| Metric | Option A (-O2) | Option A (Optimized) | Option B (-O2) | Option B (Optimized) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Traps per Second** | 603,099.85 | 600,707.42 | 5,746,028.15 | 8,949,703.36 |
+| **Avg Latency/Trap** | 1,658.10 ns | 1,664.70 ns | 174.03 ns | **111.74 ns** |
+| **Speedup/Reduction**| *Baseline* | *Hardware Bound* | *Baseline* | **35.7% Latency Reduction** |
+
+*Note: For **Option A (Safe Mode)**, the compiler flag impact is negligible (variance under 1% due to background context switching noise). This confirms that Option A is entirely bound by the kernel's hardware exception context-switching overhead (~1,300 ns). However, for **Option B (Experimental Mode)**, which operates entirely in user space, targeting the native CPU architecture combined with LTO and `-O3` delivers a massive **35.7% latency reduction** and a **55.7% throughput increase**.*
+
 ---
 
 ## 🔴 Expert Level: Hardware Context and Latency Budget
