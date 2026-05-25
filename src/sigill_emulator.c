@@ -11,6 +11,24 @@
 static struct sigaction old_sa;
 static struct sigaction old_sa_trap;
 static int debug_emu = 0;
+/*
+ * Emulation mode selection variable:
+ * - 0: Safe Mode (Option A - Default). Pure software signal-trapping and emulation.
+ * - 1: Experimental Mode (Option B). JIT dynamic code patching using Trampoline Islands.
+ *
+ * For detailed explanations of Option A vs Option B, including W^X security policies,
+ * SELinux/AppArmor constraints, and fallback architectures, see:
+ * - docs/LEARNING_GUIDE.md:
+ *   "🧠 Advanced Concept: Overcoming the x86-64 2GB relative call limit (Trampoline Islands)"
+ *   "🧠 Advanced Concept: W^X Compliance and Mandatory Access Control (SELinux & AppArmor)"
+ *   "🧠 Advanced Concept: Graceful Degradation & Unidirectional Fallback"
+ * - docs/session_log.md:
+ *   "🌟 Advanced Engineering: Performance Tuning & Concurrency (Commits 1d79599 to 6c80c7e)"
+ *   "🌟 Security Analysis: SELinux & AppArmor Compliance"
+ *   "🌟 Fallback Architecture: Graceful Degradation"
+ * - docs/benchmark_results.md:
+ *   "🟡 Developer Level: Benchmark Setup and Comparison"
+ */
 static int emu_mode_experimental = 0;
 
 // AES Tables and S-Box definitions
