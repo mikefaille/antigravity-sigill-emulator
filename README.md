@@ -62,23 +62,47 @@ sudo apt-get install build-essential gcc
 ```
 
 ### Step 2: Build and Install the Emulator
-Compile the compatibility library and install it to your user directory:
+Compile the compatibility library and install it to your user directory. This automatically builds three dynamic library variants:
+*   **`sigill_emulator.so`** (Native): Optimized dynamically for your host CPU.
+*   **`sigill_emulator_v1.so`** (x86-64 LEGACY, circa 2003): Compatible with the original 64-bit instruction set specifications.
+*   **`sigill_emulator_v2.so`** (x86-64-v2, circa 2009): Targets architectures with SSE3, SSSE3, SSE4.1, SSE4.2, and POPCNT support (like Intel Nehalem/Westmere).
+
 ```bash
-# Build the project
+# Build all library targets
 make
 
-# Install globally to /home/michael/sigill_emulator.so
+# Install all target libraries to /home/michael/
 make install
 ```
 
 ### Step 3: Run Your Program
-Execute your target program (e.g. `agy.real`) preloaded with the compatibility library:
+Execute your target program (e.g. `agy.real`) preloaded with one of the compatibility libraries:
+
+#### 1. Safe Mode (Option A - Default)
+Pure trap-and-emulate logic via `SIGILL` signal handling. Memory pages remain strictly read-only (100% compliant with strict SELinux/AppArmor and W^X layouts):
 ```bash
-LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --help
+LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
 ```
+
+#### 2. Experimental Mode (Option B - Dynamic Code Patching)
+Dynamically rewrites instruction pages in RAM at runtime using Trampoline Islands. This completely bypasses the hardware/kernel context switch after the first execution, yielding a **10x+ overall speedup** (~110 ns vs ~1,650 ns):
+```bash
+EMU_MODE=experimental LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
+```
+
+#### 3. Interactive Help Menu
+Print the built-in help guide linking back to the GitHub project:
+```bash
+# Run with --help flag
+LD_PRELOAD=/home/michael/sigill_emulator.so ./your_program --help
+
+# Or trigger using the EMU_HELP environment variable:
+EMU_HELP=1 LD_PRELOAD=/home/michael/sigill_emulator.so ./your_program
+```
+
 *Tip: To see active emulation traces in your console, run with `DEBUG_EMU=1`:*
 ```bash
-DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real --help
+DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
 ```
 
 ### Step 4: Configure LD_PRELOAD Permanently (Shell Configurations)

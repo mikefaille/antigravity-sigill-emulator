@@ -68,11 +68,11 @@ Below is the micro-benchmark comparison:
 
 | Metric | Trap-Based (Option A) | Dynamic Patching (Option B) | Difference | Speedup |
 | :--- | :--- | :--- | :--- | :--- |
-| **Elapsed Time** | 1.658100 seconds | 0.174033 seconds | **-1.484067 seconds** | **9.5x** |
-| **Traps per Second** | 603,099.85 | 5,746,028.15 | **+5,142,928.30** | **9.5x** |
-| **Avg Latency/Trap** | 1,658.10 ns | 174.03 ns | **-1,484.07 ns** | **9.5x** |
+| **Elapsed Time** | 1.664704 seconds | 0.111736 seconds | **-1.552968 seconds** | **14.9x** |
+| **Traps per Second** | 600,707.42 | 8,949,703.36 | **+8,348,995.94** | **14.9x** |
+| **Avg Latency/Trap** | 1,664.70 ns | 111.74 ns | **-1,552.96 ns** | **14.9x** |
 
-*Note: The remaining 174 ns latency per trap is entirely user-space overhead (trampoline pushes/pops for all XMM and general-purpose registers, direct-mapped cache verification, and SSE mathematical calculations). On all subsequent executions, kernel mode transitions and CPU signal trapping are reduced to exactly **zero**, resulting in virtually 0% kernel CPU utilization under real-world server environments.*
+*Note: The remaining 111.74 ns latency per trap is entirely user-space overhead (trampoline pushes/pops for all XMM and general-purpose registers, direct-mapped cache verification, and SSE mathematical calculations). On all subsequent executions, kernel mode transitions and CPU signal trapping are reduced to exactly **zero**, resulting in virtually 0% kernel CPU utilization under real-world server environments.*
 
 ---
 

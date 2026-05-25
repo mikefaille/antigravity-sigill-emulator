@@ -186,15 +186,27 @@ When our handler returns, the OS restores the context, and the CPU resumes execu
 Before modifying the emulator, it is crucial to understand how we compile a raw C source file into a dynamic library that can be injected via `LD_PRELOAD`.
 
 ### The Compilation Command
-Run the following command in your terminal:
-```bash
-gcc -shared -fPIC -O2 -Wall -o sigill_emulator.so src/sigill_emulator.c
-```
+To optimize for different hardware specifications, compile targeting the appropriate architecture:
+
+*   **Native Optimization (For the Host CPU):**
+    ```bash
+    gcc -shared -fPIC -O3 -march=native -flto -Wall -o sigill_emulator.so src/sigill_emulator.c
+    ```
+*   **v1 Build (x86-64 Legacy, circa 2003):**
+    ```bash
+    gcc -shared -fPIC -O3 -march=x86-64 -flto -Wall -o sigill_emulator_v1.so src/sigill_emulator.c
+    ```
+*   **v2 Build (x86-64-v2, circa 2009):**
+    ```bash
+    gcc -shared -fPIC -O3 -march=x86-64-v2 -flto -Wall -o sigill_emulator_v2.so src/sigill_emulator.c
+    ```
 
 ### Compiler Flags Explained:
 *   **`-shared`**: Tells the compiler to produce a shared object (`.so`) library instead of a standard executable binary (which expects a `main` function).
 *   **`-fPIC`**: Generates **Position Independent Code**. Shared libraries are loaded into arbitrary address locations in a process's memory space at runtime. `-fPIC` ensures the machine instructions use relative offsets (RIP-relative addressing) instead of absolute memory locations.
-*   **`-O2`**: Activates Level 2 optimization, which is essential to minimize signal-trapping latency.
+*   **`-O3`**: Activates Level 3 optimization. It enables loop unrolling, vectorization (using supported SSE vector extensions), and more aggressive code optimizations compared to `-O2` to minimize instruction translation latencies.
+*   **`-march=native|x86-64|x86-64-v2`**: Selects the target CPU instruction set. `x86-64` targets the base 2003 AMD64 specification. `x86-64-v2` adds support for SSE3, SSSE3, SSE4.1, SSE4.2, and POPCNT, which aligns with Xeon Nehalem/Westmere architectures. `native` autodetects and targets all instruction sets supported by the machine running the compiler.
+*   **`-flto`**: Activates **Link-Time Optimization**. LTO passes the compiler intermediate representation bytes so it can optimize and inline helper code (such as math functions and cache checks) across translation units at link time.
 *   **`-Wall`**: Enables all compiler warning messages to ensure code safety.
 
 ### 🚨 Troubleshooting: Atomic Installation and `LD_PRELOAD` Race Conditions
