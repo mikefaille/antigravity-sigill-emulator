@@ -223,6 +223,35 @@ This is fully automated in the project's [Makefile](../Makefile) under the `inst
 
 ---
 
+## 🧠 Advanced Concept: Lock-Free Metadata Caching (`Seqlock`)
+
+When running highly multi-threaded processes (like the Go runtime which spawns dozens of concurrent OS threads), multiple threads can trigger `SIGILL` traps simultaneously. To maximize performance, we must avoid re-decoding instruction bytes (prefixes, REX, ModRM, SIB) on every single trap.
+
+However, since signal handlers are invoked asynchronously on arbitrary threads, standard thread synchronization mechanisms like mutexes (`pthread_mutex_t`) **are not async-signal-safe** and can cause deadlocks if a signal interrupts a thread that already holds the lock.
+
+### The Lock-Free Direct-Mapped Cache
+To solve this, we implement a direct-mapped cache table indexed by a hash of the instruction pointer:
+```c
+#define CACHE_SIZE 1024
+static struct cache_entry rip_cache[CACHE_SIZE];
+
+static inline uint32_t get_cache_index(uint8_t *rip) {
+    return ((uintptr_t)rip >> 2) & (CACHE_SIZE - 1);
+}
+```
+
+### The Sequence Lock (Seqlock) Pattern
+To guarantee consistency without locks when multiple threads read/write the same cache entry, we use a **Sequence Lock (Seqlock)** pattern:
+1. Each entry contains a `seq` counter initialized to `0`.
+2. **Writer**: Before writing a cache entry, the writer atomically increments `seq` to an odd number. After writing the fields, the writer atomically increments `seq` again to an even number.
+3. **Reader**: The reader reads the `seq` counter, reads the cached values, and then reads the `seq` counter again. 
+   - If `seq` is odd (indicating a write is in progress), or if `seq` changed between the two reads (indicating a write occurred during the read), the reader discards the read data and retries.
+   - Otherwise, the data is guaranteed to be consistent!
+
+This seqlock pattern is 100% async-signal-safe, lock-free, and ensures we can safely share cache entries across all Go threads with zero contention.
+
+---
+
 ## 💻 Hacking Exercise 1: Add a Dummy Instruction to the Emulator
 Let's practice extending the emulator. We will register a dummy instruction that prints a greeting whenever executed, rather than crashing the program.
 
