@@ -409,12 +409,36 @@ static uint8_t *resolve_mem_addr(ucontext_t *uc, uint8_t *rip, int has_rex, uint
     return (uint8_t *)(base_val + (index_val << scale) + disp);
 }
 
+struct cache_entry {
+    uint64_t rip;
+    uint32_t op_type;
+    uint8_t reg_idx;
+    uint8_t rm_idx;
+    uint8_t is_mem;
+    uint8_t has_rex;
+    uint8_t rex;
+    uint8_t modrm;
+    int bytes_consumed;
+    uint32_t seq;
+};
+
+#define CACHE_SIZE 1024
+static struct cache_entry rip_cache[CACHE_SIZE];
+
+static inline uint32_t get_cache_index(uint8_t *rip) {
+    return ((uintptr_t)rip >> 2) & (CACHE_SIZE - 1);
+}
+
 /*
  * The SIGILL signal handler.
  * This is invoked by the OS kernel when an invalid opcode exception occurs.
  * We parse the instruction pointer (RIP) in the saved thread context (ucontext_t)
  * to determine if the crash was caused by an unsupported AES-NI or PCLMULQDQ instruction.
  * If so, we emulate it and advance the RIP register so the program can resume.
+ *
+ * To minimize latency under high thread contention, we use a lock-free, direct-mapped
+ * metadata cache with a seqlock sequence counter. On cache hit, we bypass all instruction
+ * decoding logic and execute the math emulation immediately.
  */
 static void handler(int sig, siginfo_t *si, void *ctx_void) {
     ucontext_t *uc = (ucontext_t *)ctx_void;
@@ -425,6 +449,86 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
     // Get the instruction pointer (RIP) representing where the crash occurred
     uint8_t *rip = (uint8_t *)uc->uc_mcontext.gregs[REG_RIP];
     
+    // Try lock-free cache lookup first
+    uint32_t idx = get_cache_index(rip);
+    struct cache_entry *entry = &rip_cache[idx];
+    
+    uint32_t seq1, seq2;
+    uint64_t entry_rip;
+    uint32_t cached_op_type = 0;
+    uint8_t cached_reg_idx = 0, cached_rm_idx = 0, cached_is_mem = 0, cached_has_rex = 0, cached_rex = 0, cached_modrm = 0;
+    int cached_bytes_consumed = 0;
+    int cache_hit = 0;
+    
+    for (int retry = 0; retry < 3; retry++) {
+        seq1 = __atomic_load_n(&entry->seq, __ATOMIC_ACQUIRE);
+        if (seq1 & 1) continue; // Write in progress
+        
+        entry_rip = entry->rip;
+        cached_op_type = entry->op_type;
+        cached_reg_idx = entry->reg_idx;
+        cached_rm_idx = entry->rm_idx;
+        cached_is_mem = entry->is_mem;
+        cached_has_rex = entry->has_rex;
+        cached_rex = entry->rex;
+        cached_modrm = entry->modrm;
+        cached_bytes_consumed = entry->bytes_consumed;
+        
+        seq2 = __atomic_load_n(&entry->seq, __ATOMIC_ACQUIRE);
+        if (seq1 == seq2) {
+            if (entry_rip == (uint64_t)rip) {
+                cache_hit = 1;
+            }
+            break;
+        }
+    }
+    
+    if (cache_hit) {
+        uint8_t *dest = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[cached_reg_idx];
+        if (cached_op_type == 0xde || cached_op_type == 0xdf || cached_op_type == 0xdb || cached_op_type == 0xdc || cached_op_type == 0xdd) {
+            uint8_t *src;
+            if (cached_is_mem) {
+                int dummy_bytes_consumed;
+                src = resolve_mem_addr(uc, rip, cached_has_rex, cached_rex, cached_modrm, &dummy_bytes_consumed);
+            } else {
+                src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[cached_rm_idx];
+            }
+            
+            if (debug_emu) {
+                log_emu_aes(cached_op_type, cached_reg_idx, cached_is_mem ? 99 : cached_rm_idx);
+            }
+            
+            if (cached_op_type == 0xde) emulate_aesdec(dest, src);
+            else if (cached_op_type == 0xdf) emulate_aesdeclast(dest, src);
+            else if (cached_op_type == 0xdb) emulate_aesimc(dest, src);
+            else if (cached_op_type == 0xdc) emulate_aesenc(dest, src);
+            else if (cached_op_type == 0xdd) emulate_aesenclast(dest, src);
+            
+            uc->uc_mcontext.gregs[REG_RIP] += cached_bytes_consumed;
+            return;
+        } else if (cached_op_type == 0x44) {
+            uint8_t *src;
+            uint8_t imm;
+            if (cached_is_mem) {
+                int dummy_bytes_consumed;
+                src = resolve_mem_addr(uc, rip, cached_has_rex, cached_rex, cached_modrm, &dummy_bytes_consumed);
+                imm = rip[cached_bytes_consumed - 1];
+            } else {
+                src = (uint8_t *)&uc->uc_mcontext.fpregs->_xmm[cached_rm_idx];
+                imm = rip[1 + cached_has_rex + 4];
+            }
+            
+            if (debug_emu) {
+                log_emu_pclmul(cached_reg_idx, cached_is_mem ? 99 : cached_rm_idx, imm);
+            }
+            
+            emulate_pclmulqdq(dest, src, imm);
+            uc->uc_mcontext.gregs[REG_RIP] += cached_bytes_consumed;
+            return;
+        }
+    }
+    
+    // Cache miss: parse and decode instruction, then cache the metadata
     // 0x66 operand size override prefix: tells x86 to execute SSE/AVX 128-bit instructions
     if (rip[0] == 0x66) {
         int has_rex = 0;
@@ -474,8 +578,24 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 else if (op_type == 0xdc) emulate_aesenc(dest, src);
                 else if (op_type == 0xdd) emulate_aesenclast(dest, src);
                 
+                int bytes_consumed = 5 + has_rex;
+                
+                // Write to cache
+                uint32_t seq_val = __atomic_load_n(&entry->seq, __ATOMIC_RELAXED);
+                __atomic_store_n(&entry->seq, seq_val + 1, __ATOMIC_RELEASE);
+                entry->rip = (uint64_t)rip;
+                entry->op_type = op_type;
+                entry->reg_idx = reg_idx;
+                entry->rm_idx = rm_idx;
+                entry->is_mem = 0;
+                entry->has_rex = has_rex;
+                entry->rex = rex;
+                entry->modrm = modrm;
+                entry->bytes_consumed = bytes_consumed;
+                __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
+                
                 // Skip the executed instruction (prefix + opcode + ModRM = 5 bytes + REX)
-                uc->uc_mcontext.gregs[REG_RIP] += (5 + has_rex);
+                uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
                 return;
             } else {
                 // Register-to-memory operation: resolve the target effective memory address
@@ -492,11 +612,26 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 else if (op_type == 0xdc) emulate_aesenc(dest, src);
                 else if (op_type == 0xdd) emulate_aesenclast(dest, src);
                 
+                // Write to cache
+                uint32_t seq_val = __atomic_load_n(&entry->seq, __ATOMIC_RELAXED);
+                __atomic_store_n(&entry->seq, seq_val + 1, __ATOMIC_RELEASE);
+                entry->rip = (uint64_t)rip;
+                entry->op_type = op_type;
+                entry->reg_idx = reg_idx;
+                entry->rm_idx = 0;
+                entry->is_mem = 1;
+                entry->has_rex = has_rex;
+                entry->rex = rex;
+                entry->modrm = modrm;
+                entry->bytes_consumed = bytes_consumed;
+                __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
+                
                 // Skip the executed instruction by the calculated byte length
                 uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
                 return;
             }
         } else if (opcode[0] == 0x0f && opcode[1] == 0x3a && opcode[2] == 0x44) {
+            uint8_t op_type = 0x44; // Custom type representation for PCLMULQDQ
             uint8_t modrm = opcode[3];
             
             // Extract destination register index from the ModRM byte (bits 3-5)
@@ -520,8 +655,24 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 
                 emulate_pclmulqdq(dest, src, imm);
                 
+                int bytes_consumed = 6 + has_rex;
+                
+                // Write to cache
+                uint32_t seq_val = __atomic_load_n(&entry->seq, __ATOMIC_RELAXED);
+                __atomic_store_n(&entry->seq, seq_val + 1, __ATOMIC_RELEASE);
+                entry->rip = (uint64_t)rip;
+                entry->op_type = op_type;
+                entry->reg_idx = reg_idx;
+                entry->rm_idx = rm_idx;
+                entry->is_mem = 0;
+                entry->has_rex = has_rex;
+                entry->rex = rex;
+                entry->modrm = modrm;
+                entry->bytes_consumed = bytes_consumed;
+                __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
+                
                 // Skip instruction (prefix + opcode + ModRM + imm = 6 bytes + REX)
-                uc->uc_mcontext.gregs[REG_RIP] += (6 + has_rex);
+                uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
                 return;
             } else {
                 int bytes_consumed = 0;
@@ -533,6 +684,20 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
                 }
                 
                 emulate_pclmulqdq(dest, src, imm);
+                
+                // Write to cache
+                uint32_t seq_val = __atomic_load_n(&entry->seq, __ATOMIC_RELAXED);
+                __atomic_store_n(&entry->seq, seq_val + 1, __ATOMIC_RELEASE);
+                entry->rip = (uint64_t)rip;
+                entry->op_type = op_type;
+                entry->reg_idx = reg_idx;
+                entry->rm_idx = 0;
+                entry->is_mem = 1;
+                entry->has_rex = has_rex;
+                entry->rex = rex;
+                entry->modrm = modrm;
+                entry->bytes_consumed = bytes_consumed;
+                __atomic_store_n(&entry->seq, seq_val + 2, __ATOMIC_RELEASE);
                 
                 // Skip instruction by the calculated byte length
                 uc->uc_mcontext.gregs[REG_RIP] += bytes_consumed;
