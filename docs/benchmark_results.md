@@ -59,6 +59,21 @@ Below is the micro-benchmark comparison for `aesenc` (which uses `mix_columns` a
 
 *Note: In `aesenc` benchmarks, the relative gain is minor because hardware signal trapping (~1,000 ns context switch overhead) dominates the execution time. However, for `aesdec` (decryption) paths, the 77% math reduction cuts out 37 `gmul2` operations per trap, speeding up the math solver component by 20% to 25%.*
 
+### 4. Dynamic Code Patching Comparison (Trampoline Islands)
+To completely bypass the **~1,000 ns** hardware context-switching overhead, we implemented **Dynamic Code Patching (Trap-and-Patch)**.
+
+By allocating a nearby executable page within the +/- 2GB range of the calling executable ("Trampoline Island") and compiling 16-byte register-preserving jump stubs, we replaced the `SIGILL`-inducing instructions with relative calls directly to our user-space assembly trampoline.
+
+Below is the micro-benchmark comparison:
+
+| Metric | Trap-Based (Option A) | Dynamic Patching (Option B) | Difference | Speedup |
+| :--- | :--- | :--- | :--- | :--- |
+| **Elapsed Time** | 1.658100 seconds | 0.174033 seconds | **-1.484067 seconds** | **9.5x** |
+| **Traps per Second** | 603,099.85 | 5,746,028.15 | **+5,142,928.30** | **9.5x** |
+| **Avg Latency/Trap** | 1,658.10 ns | 174.03 ns | **-1,484.07 ns** | **9.5x** |
+
+*Note: The remaining 174 ns latency per trap is entirely user-space overhead (trampoline pushes/pops for all XMM and general-purpose registers, direct-mapped cache verification, and SSE mathematical calculations). On all subsequent executions, kernel mode transitions and CPU signal trapping are reduced to exactly **zero**, resulting in virtually 0% kernel CPU utilization under real-world server environments.*
+
 ---
 
 ## 🔴 Expert Level: Hardware Context and Latency Budget

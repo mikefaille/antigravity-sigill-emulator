@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -shared -fPIC -O2 -Wall
+CFLAGS = -shared -fPIC -O3 -march=native -flto -Wall
 TARGET = sigill_emulator.so
 SRC = src/sigill_emulator.c
 INSTALL_DIR = /home/michael
