@@ -76,26 +76,12 @@ static inline uint8_t gmul8(uint8_t x) {
     return gmul2(gmul4(x));
 }
 
-/* Multiplying by 9 is (x * 8) XOR x */
-static inline uint8_t gmul9(uint8_t x) {
-    return gmul8(x) ^ x;
-}
-
-/* Multiplying by 11 is (x * 8) XOR (x * 2) XOR x */
-static inline uint8_t gmul11(uint8_t x) {
-    return gmul8(x) ^ gmul2(x) ^ x;
-}
-
-/* Multiplying by 13 is (x * 8) XOR (x * 4) XOR x */
-static inline uint8_t gmul13(uint8_t x) {
-    return gmul8(x) ^ gmul4(x) ^ x;
-}
-
-/* Multiplying by 14 is (x * 8) XOR (x * 4) XOR (x * 2) */
-static inline uint8_t gmul14(uint8_t x) {
-    return gmul8(x) ^ gmul4(x) ^ gmul2(x);
-}
-
+/*
+ * Performs the AES MixColumns transformation on the state.
+ * MixColumns multiplies each column of the state matrix by a fixed polynomial.
+ * We optimize this mathematically by extracting the common XOR sum (temp = s0 ^ s1 ^ s2 ^ s3)
+ * which reduces the number of Galois Field doublings (gmul2) from 8 down to 4 per column.
+ */
 static void mix_columns(uint8_t *state) {
     for (int i = 0; i < 4; i++) {
         uint8_t s0 = state[0 + i*4];
@@ -103,13 +89,23 @@ static void mix_columns(uint8_t *state) {
         uint8_t s2 = state[2 + i*4];
         uint8_t s3 = state[3 + i*4];
         
-        state[0 + i*4] = gmul2(s0) ^ gmul3(s1) ^ s2 ^ s3;
-        state[1 + i*4] = s0 ^ gmul2(s1) ^ gmul3(s2) ^ s3;
-        state[2 + i*4] = s0 ^ s1 ^ gmul2(s2) ^ gmul3(s3);
-        state[3 + i*4] = gmul3(s0) ^ s1 ^ s2 ^ gmul2(s3);
+        uint8_t temp = s0 ^ s1 ^ s2 ^ s3;
+        
+        state[0 + i*4] = gmul2(s0 ^ s1) ^ temp ^ s0;
+        state[1 + i*4] = gmul2(s1 ^ s2) ^ temp ^ s1;
+        state[2 + i*4] = gmul2(s2 ^ s3) ^ temp ^ s2;
+        state[3 + i*4] = gmul2(s3 ^ s0) ^ temp ^ s3;
     }
 }
 
+/*
+ * Performs the AES InvMixColumns transformation on the state.
+ * InvMixColumns is the inverse matrix multiplication of MixColumns.
+ * We optimize this mathematically using the Daemen/Rijmen algebraic relation trick:
+ *   InvMixColumns(S) = MixColumns(S) XOR gmul8(s0 ^ s1 ^ s2 ^ s3) XOR gmul4(s_even/odd)
+ * This collapses the multiplication of large coefficients (9, 11, 13, 14) and reduces
+ * the number of gmul2 operations per column from 48 down to only 11.
+ */
 static void inv_mix_columns(uint8_t *state) {
     for (int i = 0; i < 4; i++) {
         uint8_t s0 = state[0 + i*4];
@@ -117,10 +113,15 @@ static void inv_mix_columns(uint8_t *state) {
         uint8_t s2 = state[2 + i*4];
         uint8_t s3 = state[3 + i*4];
         
-        state[0 + i*4] = gmul14(s0) ^ gmul11(s1) ^ gmul13(s2) ^ gmul9(s3);
-        state[1 + i*4] = gmul9(s0) ^ gmul14(s1) ^ gmul11(s2) ^ gmul13(s3);
-        state[2 + i*4] = gmul13(s0) ^ gmul9(s1) ^ gmul14(s2) ^ gmul11(s3);
-        state[3 + i*4] = gmul11(s0) ^ gmul13(s1) ^ gmul9(s2) ^ gmul14(s3);
+        uint8_t temp = s0 ^ s1 ^ s2 ^ s3;
+        uint8_t h8 = gmul8(temp);
+        uint8_t h4_02 = gmul4(s0 ^ s2);
+        uint8_t h4_13 = gmul4(s1 ^ s3);
+        
+        state[0 + i*4] = gmul2(s0 ^ s1) ^ temp ^ s0 ^ h8 ^ h4_02;
+        state[1 + i*4] = gmul2(s1 ^ s2) ^ temp ^ s1 ^ h8 ^ h4_13;
+        state[2 + i*4] = gmul2(s2 ^ s3) ^ temp ^ s2 ^ h8 ^ h4_02;
+        state[3 + i*4] = gmul2(s3 ^ s0) ^ temp ^ s3 ^ h8 ^ h4_13;
     }
 }
 
