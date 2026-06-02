@@ -710,6 +710,7 @@ __asm__(
     "ret\n"
 );
 
+__attribute__((force_align_arg_pointer))
 void trampoline_c_helper(uint64_t *gp_regs, uint8_t *xmm_regs, uintptr_t ret_addr) {
     struct cache_entry *entry = find_cache_entry_by_ret_addr(ret_addr);
     if (!entry) {

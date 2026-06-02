@@ -183,4 +183,29 @@ Below is the chronological log of engineering sprints, including precise commit 
 *   **Resource Immunity**:
     *   Option A acts as a bulletproof floor because it relies on static memory allocation (~56 KB) and zero runtime dynamic allocations. Cache line contentions are handled via direct eviction rather than out-of-memory errors, rendering Safe Mode immune to system resource limits.
 
+---
+
+## 🌟 Resilient Upgrades & Stack Alignment Hardening (Commit v1.0.19)
+
+Below is the log of the latest engineering sprint focusing on binary upgrade resilience and low-level JIT execution hardening.
+
+### 1. Robust Signature-Based Auto-Patcher (`patch_agy.py`)
+*   **Engineering Changes**:
+    *   Discovered that newer versions of `agy` (such as the 177M version 1.0.4) compiled with modern compilers bypass simple struct-based checks and instead inline fail-fast checks into runtime and package initialize routines.
+    *   Designed and implemented a state-of-the-art **Byte-Signature Matcher** inside `/home/michael/patch_agy.py`.
+    *   The script uses a byte regular expression to dynamically locate the prologue of Go's `cpu.Initialize` function:
+        `\x55\x48\x89\xe5\x53\x50\xe8.{4}\x8b\x05.{4}\xa9\x00\x00\x04\x00\x0f\x84`
+    *   Once found, it dynamically scans forward to locate the function's epilogue (`\x48\x83\xc4\x08\x5b\x5d\xc3`) and computes the relative target address.
+    *   Automatically writes the relative JMP instruction (`\xE9 [32-bit offset] \x90`) at the capability register-load instruction, ensuring 100% resilience against compiler address offsets or binary upgrades.
+
+### 2. JIT Trampoline Stack Alignment Hardening (Option B)
+*   **Engineering Changes**:
+    *   Identified and diagnosed a Segmentation Fault (Exit Code 139) occurring during Option B (Experimental JIT Mode) hot-loop execution.
+    *   By executing under GDB with `handle SIGILL pass noprint nostop`, caught a General Protection Fault (`SIGSEGV`) inside `emulate_aesdec` caused by an unaligned `movaps %xmm0, 0x30(%rsp)` instruction.
+    *   **The Root Cause**: Go's runtime executes with non-standard 8-byte stack alignment instead of the 16-byte alignment mandated by the System V ABI. When the JIT trampoline stub was called, the stack alignment mismatch carried over into our compiled C library.
+    *   **The Surgical Solution**: Hardened the C callback function `trampoline_c_helper` inside `src/sigill_emulator.c` using the GCC frame-alignment attribute:
+        `__attribute__((force_align_arg_pointer))`
+    *   This forces the GCC/Clang compiler to dynamically align the stack pointer `RSP` to a 16-byte boundary (`and $-16, %rsp`) in the prologue of the helper callback, ensuring all emulated vector operations are perfectly aligned and execute with absolute stability.
+
+
 

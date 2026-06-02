@@ -62,8 +62,18 @@ for insn in md.disasm(code, <crash_address>):
 
 ## 🔴 3. Patching & Preload Execution
 
-### Track A: Static Patching (Rizin)
-For binaries failing initialization CPU validation tests, patch the conditional branch checks:
+### Track A: Static Patching (Resilient Auto-Patcher & Rizin)
+For binaries failing initialization CPU validation tests, patch the conditional branch checks.
+
+#### 1. Recommended Method: Automated Signature-Based Patcher
+To automate patching and ensure resilience against binary upgrades, use the Python byte-signature auto-patcher:
+```bash
+python3 /home/michael/patch_agy.py /path/to/binary
+```
+*(This automatically scans for Go's `cpu.Initialize` pattern `55 48 89 e5 53 50 e8 [4 bytes] 8b 05 [4 bytes] a9 00 00 04 00 0f 84`, dynamically locates the nearest function epilogue, and applies the relative JMP patch cleanly. This is 100% resilient to compiler layout and address changes).*
+
+#### 2. Manual Method: Static Patching via Rizin
+If manually locating checking offsets:
 ```bash
 # Non-interactive search and relative JMP patch
 rizin -w -c "s <offset_of_validation_check>; wx e9b300000090; q" /path/to/binary
@@ -71,7 +81,9 @@ rizin -w -c "s <offset_of_validation_check>; wx e9b300000090; q" /path/to/binary
 *(The patch `e9b300000090` writes `jmp <return_block_offset>` plus one `nop` padding).*
 
 ### Track B: Shared Library preloader
-For mid-execution instruction exceptions, inject the emulation library:
+For mid-execution instruction exceptions, inject the emulation library. 
+
+**Note on Stack Alignment:** Option B (Experimental JIT Mode) is fully hardened against non-aligned stack frames (such as the Go runtime's non-standard 8-byte alignment) because the C helper callback uses `__attribute__((force_align_arg_pointer))` to dynamically realign the stack pointer to 16 bytes.
 
 ```bash
 # 1. Compile all targets
