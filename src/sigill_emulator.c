@@ -12,22 +12,31 @@ static struct sigaction old_sa;
 static struct sigaction old_sa_trap;
 static int debug_emu = 0;
 /*
- * Emulation mode selection variable:
- * - 0: Safe Mode (Option A - Default). Pure software signal-trapping and emulation.
- * - 1: Experimental Mode (Option B). JIT dynamic code patching using Trampoline Islands.
+ * Controls which emulation strategy is used when an illegal instruction is caught.
  *
- * For detailed explanations of Option A vs Option B, including W^X security policies,
- * SELinux/AppArmor constraints, and fallback architectures, see:
- * - docs/LEARNING_GUIDE.md:
- *   "🧠 Advanced Concept: Overcoming the x86-64 2GB relative call limit (Trampoline Islands)"
- *   "🧠 Advanced Concept: W^X Compliance and Mandatory Access Control (SELinux & AppArmor)"
- *   "🧠 Advanced Concept: Graceful Degradation & Unidirectional Fallback"
- * - docs/session_log.md:
- *   "🌟 Advanced Engineering: Performance Tuning & Concurrency (Commits 1d79599 to 6c80c7e)"
- *   "🌟 Security Analysis: SELinux & AppArmor Compliance"
- *   "🌟 Fallback Architecture: Graceful Degradation"
- * - docs/benchmark_results.md:
- *   "🟡 Developer Level: Benchmark Setup and Comparison"
+ * 0 — Safe Mode (default, set by EMU_MODE=safe or leaving it unset)
+ *     Every illegal instruction causes the kernel to deliver a SIGILL signal.
+ *     Our handler catches it, runs the math in software, then returns.
+ *     Works everywhere — containers, SELinux, read-only memory policies.
+ *     Overhead: ~1,650 ns per emulated instruction.
+ *
+ * 1 — Experimental Mode (set by EMU_MODE=experimental)
+ *     The first time an illegal instruction is caught we also overwrite it in
+ *     memory with a tiny call stub pointing to our emulator. Every subsequent
+ *     execution of the same instruction goes straight to the emulator without
+ *     ever entering the kernel. About 15× faster (~110 ns per call).
+ *     Requires the OS to allow writing to executable pages (mprotect). Will
+ *     not work inside strict security policies (SELinux execmem denial, etc.)
+ *     and automatically falls back to Safe Mode on a per-instruction basis if
+ *     the rewrite fails.
+ *
+ * Important: before loading this library, the target binary must have its
+ * startup CPU-feature check removed, otherwise it will print a fatal error and
+ * exit before any instructions are emulated. Use the companion patcher:
+ *   python3 /home/michael/patch_agy.py /path/to/binary
+ *
+ * Full details and benchmarks: docs/LEARNING_GUIDE.md, docs/session_log.md,
+ * docs/benchmark_results.md, docs/SKILL.md.
  */
 static int emu_mode_experimental = 0;
 
@@ -438,7 +447,20 @@ struct cache_entry {
 static void parse_mem_operand(uint8_t *rip, int has_rex, uint8_t rex, uint8_t modrm, struct cache_entry *entry) {
     uint8_t mod = modrm >> 6;
     uint8_t rm = modrm & 7;
-    uint8_t *ptr = rip + 1 + has_rex + 3; // past prefix(0x66) + REX + Opcode(3 bytes)
+    // ptr walks through the bytes that come after the fixed-size instruction header.
+    // The header is: 0x66 prefix (1 byte) + optional REX prefix (has_rex bytes) +
+    // three opcode bytes (e.g. 0x0F 0x38 0xDE for AESDEC) = 1 + has_rex + 3 bytes.
+    // That puts ptr on the ModRM byte, which the caller already decoded and passed in
+    // as the 'modrm' parameter. The branches below all call *ptr++ to consume ModRM
+    // again, which advances ptr past it to the SIB / displacement that follows.
+    //
+    // Known issue: consuming ModRM a second time means the SIB/displacement reading
+    // is off by one byte — the code reads the wrong bytes for those fields. This does
+    // not affect correctness today because Go's AES and PCLMULQDQ instructions always
+    // use register-to-register operands, so parse_mem_operand is never actually called.
+    // If memory-operand support is needed in the future, change + 3 to + 4 here so
+    // ptr starts on the byte immediately after ModRM.
+    uint8_t *ptr = rip + 1 + has_rex + 3;
     
     entry->is_rip_relative = 0;
     entry->base_reg_idx = 255;
@@ -710,6 +732,23 @@ __asm__(
     "ret\n"
 );
 
+/*
+ * Why force_align_arg_pointer is here:
+ *
+ * Go keeps its goroutine stacks aligned to 8 bytes. The x86-64 C calling convention
+ * requires 16-byte alignment whenever a function is called. When the JIT stub jumps
+ * into this function, the stack is therefore misaligned by 8 bytes.
+ *
+ * That normally goes unnoticed — until the compiler generates a 'movaps' instruction
+ * (used inside the AES emulator functions) which requires 16-byte alignment and
+ * will hard-fault on anything less.
+ *
+ * This attribute tells GCC/Clang to insert an alignment fix (and $-16, %rsp) at
+ * the very top of this function before it allocates any local storage, so all
+ * downstream vector operations are safe regardless of how misaligned the caller was.
+ *
+ * See docs/session_log.md → "🌟 Resilient Upgrades & Stack Alignment Hardening"
+ */
 __attribute__((force_align_arg_pointer))
 void trampoline_c_helper(uint64_t *gp_regs, uint8_t *xmm_regs, uintptr_t ret_addr) {
     struct cache_entry *entry = find_cache_entry_by_ret_addr(ret_addr);

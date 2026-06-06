@@ -75,17 +75,24 @@ make
 make install
 ```
 
-### Step 3: Run Your Program
-Execute your target program (e.g. `agy.real`) preloaded with one of the compatibility libraries:
+### Step 3: Patch the Binary (Track A — One-time Static Fix)
+Before running, apply the static CPU validation bypass. This removes the startup gate that kills the process immediately on old CPUs:
+```bash
+python3 /home/michael/patch_agy.py /path/to/binary.real
+```
+Exit `0` means success (or already patched). The original binary is backed up as `binary.real.bak` on the first run.
 
-#### 1. Safe Mode (Option A - Default)
-Pure trap-and-emulate logic via `SIGILL` signal handling. Memory pages remain strictly read-only (100% compliant with strict SELinux/AppArmor and W^X layouts):
+### Step 4: Run Your Program (Track B — Runtime Emulation)
+Execute your target program preloaded with one of the compatibility libraries:
+
+#### 1. Safe Mode (Default)
+Pure trap-and-emulate via `SIGILL` signal handling. Memory pages remain strictly read-only — 100% compliant with SELinux/AppArmor and W^X policies:
 ```bash
 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
 ```
 
-#### 2. Experimental Mode (Option B - Dynamic Code Patching)
-Dynamically rewrites instruction pages in RAM at runtime using Trampoline Islands. This completely bypasses the hardware/kernel context switch after the first execution, yielding a **10x+ overall speedup** (~110 ns vs ~1,650 ns):
+#### 2. Experimental Mode (10x Faster, Requires Writable Code Pages)
+Rewrites instruction pages in RAM at runtime using JIT Trampoline Islands. Eliminates the kernel context switch after the first trap, yielding a **10x+ speedup** (~110 ns vs ~1,650 ns). Requires `mprotect` — not compatible with strict SELinux `execmem` policies:
 ```bash
 EMU_MODE=experimental LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
 ```
@@ -105,31 +112,36 @@ EMU_HELP=1 LD_PRELOAD=/home/michael/sigill_emulator.so ./your_program
 DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
 ```
 
-### Step 4: Configure LD_PRELOAD Permanently (Shell Configurations)
-To avoid typing `LD_PRELOAD` before every command, you can configure it permanently in your shell profiles (for `bash`, `zsh`, or sh).
+### Step 5: Configure Permanently — Wrapper Script (Recommended)
+The wrapper script approach is the most robust option for `agy` because it **automatically re-patches after every self-update** — you never need to manually re-run the patcher when the Antigravity IDE upgrades its language server.
 
-#### Option A: Shell Alias (Safe, Target-Specific)
-This is the safest method because it only preloads the library when you run the specific binary. Add this to your `~/.bashrc`, `~/.zshrc`, or `~/.bash_aliases`:
+The wrapper at `~/.local/bin/agy` handles both tracks in one place:
+1. Detects if `agy.real` is newer than the last-patched marker (`~/.local/bin/.agy.real.patched`)
+2. If so, runs `patch_agy.py` automatically and logs output to `/tmp/agy_patch.log`
+3. Sets `LD_PRELOAD` and launches `agy.real`
+
+No further configuration is needed if you installed via this wrapper.
+
+#### Alternative: Shell Alias (Manual Patch Required After Each Update)
+If you prefer a simple alias without auto-patching, remember to re-run `patch_agy.py` manually whenever `agy` updates itself:
 ```bash
 alias agy="LD_PRELOAD=/home/michael/sigill_emulator.so /home/michael/.local/bin/agy.real"
 ```
 
-#### Option B: Global Shell Export (Convenient, Multi-process)
-This automatically preloads the compatibility library for *all* processes launched by your shell. Since the emulator has practically zero overhead for compatible standard instructions, this is safe and highly convenient.
-
-Add this export statement to your shell configuration files:
-*   **For standard shells (`sh`/`bash`):** Add to `~/.profile` or `~/.bashrc`:
+#### Alternative: Global Shell Export (Applies to All Processes)
+This automatically preloads the compatibility library for *all* processes launched by your shell. Safe to use since the emulator has negligible overhead on CPUs that don't need it:
+*   **For `bash`:** Add to `~/.bashrc`:
     ```bash
     export LD_PRELOAD="/home/michael/sigill_emulator.so"
     ```
-*   **For Z-shell (`zsh`):** Add to `~/.zshrc`:
+*   **For `zsh`:** Add to `~/.zshrc`:
     ```bash
     export LD_PRELOAD="/home/michael/sigill_emulator.so"
     ```
 
-Reload your profile to apply changes:
+Reload your profile to apply:
 ```bash
-source ~/.profile  # or source ~/.bashrc / ~/.zshrc
+source ~/.bashrc  # or ~/.zshrc
 ```
 
 ---
@@ -146,6 +158,8 @@ source ~/.profile  # or source ~/.bashrc / ~/.zshrc
 ## 🛠️ Toolkit Components
 
 *   **`src/sigill_emulator.c`**: Core emulator catching `SIGILL` signals, decoding register states, performing software AES/carry-less operations, and returning state.
+*   **`/home/michael/patch_agy.py`**: Multi-signature static patcher (Track A). Patches any compatible Go binary; detects already-patched state; backs up the original. Generic — not tied to `agy` specifically.
+*   **`~/.local/bin/agy`**: Wrapper script combining Track A (auto-patch on update) + Track B (LD_PRELOAD). Logs to `/tmp/agy_patch.log`. Uses `~/.local/bin/.agy.real.patched` as update marker.
 *   **`scripts/find_bad_insns.py`**: Static analysis instruction scanner. Runs instantly with `uv run scripts/find_bad_insns.py`.
 *   **`benchmark/benchmark.c`**: Trapping test utility looping 1,000,000 AESENC traps.
 *   **`docs/LEARNING_GUIDE.md`**: Systems programming educational guide detailing dynamic hooking, signal trapping, and manual binary hacking.

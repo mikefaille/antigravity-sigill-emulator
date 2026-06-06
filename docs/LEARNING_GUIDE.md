@@ -9,46 +9,108 @@ To ensure this guide is fully accessible, **we assume zero prior knowledge** of 
 ## 🗺️ High-Level Architecture Overview
 A computer program is ultimately a sequence of instructions stored in a binary file. When executed, the [central processing unit (CPU)](https://en.wikipedia.org/wiki/Central_processing_unit) decodes and runs these instructions one by one.
 
-If a binary is compiled to use modern instructions (like [AES-NI](https://en.wikipedia.org/wiki/AES_instruction_set) for encryption or [PCLMULQDQ](https://en.wikipedia.org/wiki/CLMUL_instruction_set) for carry-less multiplication) but is run on a legacy CPU that physically lacks those circuits, the CPU does not know what to do. It halts and crashes the program.
+If a binary is compiled to use modern instructions (like [AES-NI](https://en.wikipedia.org/wiki/AES_instruction_set) for encryption or [PCLMULQDQ](https://en.wikipedia.org/wiki/CLMUL_instruction_set) for carry-less multiplication) but is run on a legacy CPU that physically lacks those circuits, the program crashes in two distinct ways — and we need a different fix for each one.
 
-Our toolkit bypasses this hardware limitation using two core techniques:
-1.  **Dynamic Hooking (`LD_PRELOAD`)**: Injecting our custom [shared library](https://en.wikipedia.org/wiki/Shared_library) into the target program's memory at startup.
-2.  **Hardware Exception Trapping (`SIGILL`)**: Intercepting the CPU's crash signal, decoding the unsupported instructions, executing their mathematical logic in software on the fly, and resuming the program cleanly.
+**Crash type 1 — Startup gate:** Go binaries check for required CPU features before doing any real work. If the feature is missing they print a fatal error and exit immediately, before any of the AES instructions are even reached.
+
+**Crash type 2 — Mid-execution illegal instruction:** If the startup gate is bypassed, the program runs fine until it executes an actual AES or PCLMULQDQ instruction on the unsupported CPU. The CPU raises a hardware exception and the OS kills the process.
+
+Our toolkit solves both problems with two complementary tracks:
 
 ```text
+BEFORE LAUNCH — Track A: Static Patcher (patch_agy.py)
 +-------------------------------------------------------------+
-|                     OPERATING SYSTEM                        |
-|                                                             |
-|   1. Program Starts  --->  2. LD_PRELOAD Injects Emulator   |
-|                                |                            |
-|                                v                            |
-|                       3. Sigaction Registers SIGILL Hook    |
+|  patch_agy.py reads the binary file and scans for the       |
+|  Go CPUID gate (a byte signature in the cpu.Initialize       |
+|  function). It overwrites the conditional branch with an     |
+|  unconditional JMP past the check, so the gate is never      |
+|  evaluated. The fix survives reboots — it lives on disk.     |
+|                                                              |
+|  The agy wrapper re-runs this automatically every time       |
+|  the binary is replaced by a self-update.                    |
 +-------------------------------------------------------------+
-                                 |
-                                 v
+                         |
+                         v (binary now starts without aborting)
+
+AT RUNTIME — Track B: Signal Emulator (sigill_emulator.so)
 +-------------------------------------------------------------+
-|                     USER PROGRAM RUNS                       |
-|                                                             |
-|   4. CPU hits unsupported instruction (e.g. aesenc)         |
-|   5. CPU raises Hardware Exception!                         |
-|   6. Kernel catches exception -> Dispatches SIGILL signal  |
+|  1. agy wrapper sets LD_PRELOAD and launches the binary      |
+|  2. OS loader injects sigill_emulator.so before main()       |
+|  3. Constructor registers our SIGILL signal handler          |
 +-------------------------------------------------------------+
-                                 |
-                                 v
+                         |
+                         v
 +-------------------------------------------------------------+
-|                       EMULATOR HOOK                         |
-|                                                             |
-|   7. Reads opcode bytes at RIP                              |
-|   8. Emulates AES math in software                          |
-|   9. Modifies target register context (ucontext_t)          |
-|  10. Advances RIP past instruction                          |
-|  11. Returns -> CPU resumes program smoothly                |
+|  4. CPU hits an AES instruction it cannot execute            |
+|  5. CPU raises a hardware illegal-instruction exception      |
+|  6. Kernel delivers SIGILL to our registered handler         |
++-------------------------------------------------------------+
+                         |
+                         v
++-------------------------------------------------------------+
+|  7. Handler reads the opcode bytes at RIP                    |
+|  8. Emulates the AES math in software                        |
+|  9. Writes the result into the saved register context        |
+| 10. Advances RIP past the instruction                        |
+| 11. Returns — CPU resumes the program at the next line       |
 +-------------------------------------------------------------+
 ```
 
 ---
 
-## 🧠 Core Concept 1: Dynamic Library Loading (`LD_PRELOAD`)
+## 🧠 Core Concept 1: Static Binary Patching (Track A)
+
+Before we can even inject our runtime emulator, we have to deal with the startup gate. Go's runtime calls a function called `cpu.Initialize` very early in the program's life. That function checks whether the CPU supports the features the binary was compiled for, and if not, prints a fatal message and calls `exit()` — before `main()` even runs.
+
+### What does the gate look like in machine code?
+
+At the machine-code level, the check compiles down to something like this sequence of bytes:
+
+```text
+call  cpu.Initialize        ; ask the CPU what it supports
+mov   eax, [cpu_features]   ; load the result into register EAX
+test  eax, 0x40000          ; check if bit 18 (AES) is set
+je    <epilogue>            ; if NOT set → jump to the exit path (crash)
+```
+
+The bytes for `mov eax, [cpu_features]` look like `8B 05 ?? ?? ?? ??` in the binary file (6 bytes). That is exactly what we overwrite.
+
+### The patch: turn a conditional check into an unconditional skip
+
+We replace those 6 bytes with a 5-byte unconditional `JMP` instruction plus one padding `NOP` byte:
+
+```text
+E9 [4-byte relative offset] 90
+```
+
+The `E9` opcode means "jump to this relative address". We point it directly at the function's normal return code — the epilogue. The CPU never evaluates the feature check at all; it jumps straight to the exit of `cpu.Initialize` as if everything was fine.
+
+### How does patch_agy.py find the right bytes?
+
+The patcher uses a **byte-signature** — a pattern of known bytes with wildcards for the parts that change between binary versions:
+
+```
+55 48 89 E5 53 50     <- function prologue: push rbp, set up frame, push registers
+E8 ?? ?? ?? ??        <- call cpu.Initialize (target address changes each build)
+8B 05 ?? ?? ?? ??     <- MOV EAX,[cpu_features]  ← we overwrite this
+A9 00 00 04 00        <- TEST EAX, 0x40000
+0F 84                 <- JE (jump-if-equal)
+```
+
+The `??` bytes are wildcards. The patcher also scans forward for the function's epilogue (`add rsp,8; pop rbx; pop rbp; ret`) to compute the exact relative offset for the jump. This means the patch works even when the binary is recompiled and all the addresses change — only the surrounding byte pattern needs to stay the same, and it has been stable across every observed build.
+
+### How does the patcher know if the binary was already patched?
+
+After writing the patch, the 6 bytes at that position look like `E9 [offset] 90` instead of `8B 05 ...`. On the next run the patcher scans for this JMP fingerprint before trying to patch again. If it finds it, it exits immediately without touching the file, making the operation safe to run repeatedly.
+
+### Why does the wrapper re-run the patcher automatically?
+
+When the Antigravity IDE updates itself, it downloads a fresh binary and replaces the old one on disk. The new binary has the original CPUID gate again. The `agy` wrapper script detects this using a marker file — it compares the modification time of `agy.real` against a `.agy.real.patched` timestamp file. If the binary is newer than the marker, the patcher runs before launch, then the marker is refreshed. This whole cycle is transparent: the user just types `agy` and it works, regardless of when the IDE last updated.
+
+---
+
+## 🧠 Core Concept 2: Dynamic Library Loading (`LD_PRELOAD`)
+
 
 Before a program runs, it must be loaded into the computer's [random-access memory (RAM)](https://en.wikipedia.org/wiki/Random-access_memory). 
 
@@ -75,7 +137,7 @@ The `__attribute__((constructor))` is a compiler directive. It registers the fun
 
 ---
 
-## 🧠 Core Concept 2: Hardware Exceptions & POSIX Signals
+## 🧠 Core Concept 3: Hardware Exceptions & POSIX Signals
 
 CPUs read instructions in the form of binary byte sequences called [opcodes](https://en.wikipedia.org/wiki/Opcode). If the CPU reads an opcode that does not exist in its instruction set architecture (ISA), it cannot proceed.
 
@@ -87,7 +149,7 @@ CPUs read instructions in the form of binary byte sequences called [opcodes](htt
 
 ---
 
-## 🧠 Core Concept 3: Thread Context Manipulation (`ucontext_t`)
+## 🧠 Core Concept 4: Thread Context Manipulation (`ucontext_t`)
 
 A CPU uses ultra-fast internal storage units called [processor registers](https://en.wikipedia.org/wiki/Processor_register) to hold temporary values, memory addresses, and execution states. 
 
@@ -131,7 +193,7 @@ We fetch the corresponding register values from `uc->uc_mcontext.gregs` and retr
 
 ---
 
-## 🧠 Core Concept 4: Finite Field Math & Branchless Optimization
+## 🧠 Core Concept 5: Finite Field Math & Branchless Optimization
 
 The Advanced Encryption Standard (AES) relies on mathematical operations in a [finite field / Galois Field](https://en.wikipedia.org/wiki/Finite_field) (specifically $\text{GF}(2^8)$). In this mathematical system, addition is represented by bitwise [exclusive OR (XOR)](https://en.wikipedia.org/wiki/Exclusive_or) operations, and multiplication is defined modulo an irreducible polynomial ($x^8 + x^4 + x^3 + x + 1$, or hex `0x1B`).
 
@@ -297,7 +359,7 @@ W^X is a fundamental security policy enforced at the CPU and MMU level. It dicta
 - **Executable** (so the CPU can execute code in them),
 - But **never both simultaneously**.
 
-#### How Option B (Experimental Mode) violates raw W^X:
+#### How Experimental Mode violates raw W^X:
 To patch instructions in-place, Option B changes the target code page from read-executable (`PROT_READ | PROT_EXEC`) to writable (`PROT_READ | PROT_WRITE | PROT_EXEC`), overwrites the instruction, and changes it back. This temporary combination is heavily monitored and blocked by security modules.
 
 #### Secure W^X-Compliant Patching: `/proc/self/mem`
@@ -323,9 +385,9 @@ deny @{PROC}/[0-9]*/mem rwklx,
 ```
 This rule intercepts the `open()` call to `/proc/self/mem` and returns a `Permission Denied` (`EACCES`) error, causing any in-place patching attempt to crash.
 
-### 3. Why Option A (Safe Mode) is the Secure Standard
+### 3. Why Safe Mode is the Secure Standard
 
-Because Option B's JIT compiling and memory-patching techniques are incompatible with strict MAC security, **Option A (Safe Mode) remains the industry standard for hardened environments**:
+Because Experimental Mode's JIT compiling and memory-patching techniques are incompatible with strict MAC security, **Safe Mode remains the industry standard for hardened environments**:
 
 *   **No runtime memory modification**: It does not allocate any JIT pages or write to `/proc/self/mem`.
 *   **Static Executable Labeling**: The signal handler runs inside the static dynamic library `sigill_emulator.so` loaded by the standard operating system loader (`ld.so`) at startup. The library file is labeled on disk (e.g. as `lib_t`), allowing SELinux to approve its execution.
@@ -362,8 +424,8 @@ If the JIT engine fails at any stage (e.g. unable to allocate a JIT Trampoline I
 ### 2. Per-Instruction Granularity
 Rather than aborting the entire process, the fallback operates on a **per-instruction basis**. If the emulator successfully patches 9 out of 10 instructions but fails to patch the 10th (e.g. due to page boundaries or memory locks), the 9 patched sites execute at direct hardware speed, while the 10th site seamlessly degrades to software emulation.
 
-### 3. Option A Immunity to Resource Exhaustion
-Option A acts as the absolute floor of the system because it is designed to be **immune to resource exhaustion**:
+### 3. Safe Mode Immunity to Resource Exhaustion
+Safe Mode acts as the absolute floor of the system because it is designed to be **immune to resource exhaustion**:
 *   **No Dynamic Memory Allocations**: It never calls `malloc()`, `mmap()`, or `memfd_create()` at runtime.
 *   **Static Memory Footprint**: The direct-mapped Seqlock cache table is allocated statically inside the library's data segment at load time, taking a fixed **56 KB** of RAM.
 *   **Cache Eviction instead of Out of Memory**: If multiple thread targets collide in the cache index, old metadata entries are overwritten (evicted) using lock-free atomic sequence numbers. There is no failure condition or memory leak associated with the cache filling up.
@@ -430,72 +492,109 @@ int main() {
 
 ---
 
-## 💻 Hacking Exercise 2: Static Patching via Rizin
+## 💻 Hacking Exercise 2: Static Binary Patching
 
-Statically modifying binaries (binary hacking) is used to bypass checks permanently without using a runtime signal handler.
+Statically modifying a binary file on disk (binary patching) removes a check permanently without needing a runtime signal handler. This exercise teaches you how it works in two ways: first using the automated patcher, then by hand with Rizin so you understand every step.
 
 ### The Mechanics of a Jump Patch
-When Go compiles:
-```go
-if cpu.X86.HasAES == false {
-    panic("This binary requires AES")
-}
+
+When Go compiles the CPU feature check it produces a conditional branch. In simplified assembly it looks like:
+
+```asm
+call  cpu.Initialize        ; detect CPU features, store in global
+mov   eax, [cpu_features]   ; load the result
+test  eax, 0x40000          ; check bit 18 (AES)
+je    <exit and crash>      ; if AES is missing → exit
 ```
-It compiles into a conditional branch in assembly (e.g. `jne` / Jump if Not Equal).
-If we want to bypass this check, we overwrite the conditional jump instruction with a direct relative jump (`jmp`) or `NOP`s (No-Operation, byte `0x90`).
 
-### Step-by-Step Rizin Hacking Guide
+To bypass this we replace the `mov eax, [cpu_features]` instruction (6 bytes) with an unconditional jump directly to the function's return code, so the test is never reached.
 
-1.  **Open Rizin in Write Mode**:
-    ```bash
-    rizin -w agy.real
-    ```
-2.  **Locate the function** (symbol names are prefixed with `sym.`):
-    ```text
-    > is ~cpu.Initialize
-    ```
-    This displays the address (e.g., `0x0074d0f0`).
-3.  **Seek to the address**:
-    ```text
-    > s 0x0074d0f0
-    ```
-4.  **Disassemble the block** to find the jump gate:
-    ```text
-    > pd 15
-    ```
-    Identify the address of the conditional check (e.g. `0x0074d110`) and the exit or success path return instruction address (e.g. `0x0074d1c9`).
+---
 
-5.  **How to Calculate the Offset**:
-    If you want to write raw hex bytes, you need to calculate the relative offset:
-    `Offset = TargetAddress - (SourceAddress + InstructionLength)`
-    *   Target Address: `0x0074d1c9`
-    *   Source Address (Start of Jump): `0x0074d110`
-    *   Instruction Length of `jmp rel32`: `5` bytes
-    *   Calculation: `0x0074d1c9 - (0x0074d110 + 5) = 0xb4` (in hexadecimal).
-    *   This translates to opcode `E9 B4 00 00 00`.
+### Part A: Using the Automated Patcher (Recommended)
 
-6.  **Write the Jump Patch (Option A: Write Raw Hexadecimal)**:
-    Use the `wx` command to write the hexadecimal values of `jmp +0xb4` followed by `90` (NOP) to overwrite any leftover instruction bytes:
-    ```text
-    > wx e9b400000090
-    ```
+The automated patcher (`patch_agy.py`) handles all of the address arithmetic and byte-signature searching for you. It is the right tool for everyday use.
 
-7.  **Write the Jump Patch (Option B: Write Assembly Directly - Recommended)**:
-    Instead of calculating offsets manually, Rizin has a built-in assembler. You can write the assembly instruction directly using the `wa` (Write Assembly) command:
-    ```text
-    > wa jmp 0x0074d1c9
-    ```
-    To overwrite the remaining bytes of the original instruction with NOPs, use:
-    ```text
-    > wa nop
-    ```
+```bash
+python3 /home/michael/patch_agy.py /home/michael/.local/bin/agy.real
+```
 
-8.  **Verify & Exit**:
-    Disassemble the code again to ensure the instruction has been replaced and points to the correct destination:
-    ```text
-    > pd 5
-    > q
-    ```
+A successful run prints the matched signature, the file offset of the patch site, the original bytes, and the patch bytes written. The original binary is saved as `agy.real.bak` before any changes are made. If the binary has already been patched, the tool detects its own JMP fingerprint and exits without touching the file.
+
+**What to look for in the output:**
+```text
+[+] primary-aes-bit18: match at 0x766A3C0  jmp_site=0x766A3CB  original=8b05cf712902
+[+] Epilogue '4883c4085b5dc3' at 0x766A483  (distance: 195 bytes)
+[*] Patch: e9b300000090  (JMP rel=0xB3 → epilogue 0x766A483)
+[+] Patch applied at 0x766A3CB
+```
+
+---
+
+### Part B: Doing it by Hand with Rizin (Deep Dive)
+
+This section walks through every step that the patcher does automatically. Doing it manually builds intuition for binary structure, offset arithmetic, and instruction encoding.
+
+#### Step 1: Find the function
+
+Open the binary in Rizin's read-only mode and search for the `cpu.Initialize` symbol:
+
+```bash
+rizin agy.real
+```
+```text
+> is ~cpu.Initialize
+```
+This prints something like `0x0074d0f0  cpu.Initialize`. That is the function's base address in the binary's virtual address space.
+
+#### Step 2: Disassemble to find the gate
+
+Seek to the function and print 15 instructions:
+```text
+> s 0x0074d0f0
+> pd 15
+```
+
+Look for the pattern described above — a `mov eax` loading from a global, immediately followed by a `test` and a conditional `je`. Note the address of the `mov` instruction (the patch site) and the address of the block the `je` would jump to (the epilogue / exit of the function).
+
+#### Step 3: Calculate the relative jump offset
+
+An x86-64 relative `jmp` (`E9`) encodes the distance from the byte *after* the instruction to the target:
+
+```
+offset = target_address − (patch_site + 5)
+```
+
+Example:
+- Patch site: `0x0074d110`
+- Epilogue (target): `0x0074d1c9`
+- Offset: `0x0074d1c9 − (0x0074d110 + 5) = 0xB4`
+- Full patch bytes: `E9 B4 00 00 00 90` (`jmp +0xB4` + one NOP to cover the 6th byte)
+
+#### Step 4: Write the patch
+
+Open the binary in write mode and apply the bytes:
+```bash
+rizin -w agy.real
+```
+```text
+> s 0x0074d110
+> wx e9b400000090
+```
+
+Alternatively, let Rizin calculate the offset for you using its assembler:
+```text
+> wa jmp 0x0074d1c9
+> wa nop
+```
+
+#### Step 5: Verify
+
+Disassemble the patch site to confirm the `jmp` now points to the epilogue:
+```text
+> pd 5
+> q
+```
 
 ---
 
@@ -503,3 +602,6 @@ If we want to bypass this check, we overwrite the conditional jump instruction w
 1. Why does changing `dest[i] ^= key[i]` to use a `tmp` buffer prevent register corruption when `dest == key`?
 2. What happens if a signal handler calls a function that isn't "async-signal-safe" (like `printf`), and how did we resolve this in `sigill_emulator.c`?
 3. If you compile a native binary on ARM64, does it use x86 AES-NI instructions? Why or why not?
+4. Track A patches the binary on disk. Track B intercepts illegal instructions at runtime. Why are both needed — what problem does each one solve that the other cannot?
+5. The auto-patcher detects already-patched binaries by looking for its own JMP fingerprint (`E9 ?? ?? ?? ?? 90`) rather than re-running the full byte-signature scan. Why is this faster, and what would happen if a future version of the patcher used a different patch format?
+6. The wrapper uses a file modification-time comparison (`agy.real` newer than `.agy.real.patched`) to decide whether to re-patch. What edge cases could cause this check to give the wrong answer, and how would you make it more robust?

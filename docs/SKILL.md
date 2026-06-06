@@ -66,14 +66,38 @@ for insn in md.disasm(code, <crash_address>):
 For binaries failing initialization CPU validation tests, patch the conditional branch checks.
 
 #### 1. Recommended Method: Automated Signature-Based Patcher
-To automate patching and ensure resilience against binary upgrades, use the Python byte-signature auto-patcher:
+Use the Python auto-patcher to patch any compatible Go binary. Run it once after each binary update:
 ```bash
 python3 /home/michael/patch_agy.py /path/to/binary
 ```
-*(This automatically scans for Go's `cpu.Initialize` pattern `55 48 89 e5 53 50 e8 [4 bytes] 8b 05 [4 bytes] a9 00 00 04 00 0f 84`, dynamically locates the nearest function epilogue, and applies the relative JMP patch cleanly. This is 100% resilient to compiler layout and address changes).*
+Exit codes: `0` = success (patched or already patched), `1` = incompatible binary. Patch output (binary sha256, size, mtime, matched signature, patch site) is logged to stdout for diagnostics.
 
-#### 2. Manual Method: Static Patching via Rizin
-If manually locating checking offsets:
+**Signature variants tried in order:**
+1. `primary-aes-bit18` — full prologue + `MOV EAX,[RIP+x]` + `TEST EAX,0x40000` + `JE` (stable across all known builds May 2026–present)
+2. `generic-feature-check` — same prologue, wildcards the 4-byte TEST mask (survives future Go cpu feature bit reassignment)
+3. `no-push-rax` — shorter frame variant without `push rax`, jmp_offset=10
+4. `test-al-byte-check` — `TEST AL,imm8` compact form (pclmulqdq-style byte checks)
+
+**Epilogue variants tried in order:** `add rsp,8/16/24` + `pop rbx; pop rbp; ret`, `pop rbx; pop rbp; ret`, `pop rbp; ret`.
+
+**Already-patched detection:** Before scanning for unpatched signatures, the patcher looks for its own `JMP+NOP` fingerprint in the expected position. If found, it exits `0` without re-reading or re-patching.
+
+#### 2. Automatic Update Integration (`agy` wrapper)
+The `/home/michael/.local/bin/agy` wrapper script automatically re-applies Track A whenever `agy.real` is replaced by a self-update:
+```bash
+REAL=~/.local/bin/agy.real
+MARKER=~/.local/bin/.agy.real.patched
+
+if [ ! -f "$MARKER" ] || [ "$REAL" -nt "$MARKER" ]; then
+    python3 /home/michael/patch_agy.py "$REAL" >/tmp/agy_patch.log 2>&1 && touch "$MARKER"
+fi
+
+LD_PRELOAD=/home/michael/sigill_emulator.so exec "$REAL" "$@"
+```
+The marker file `~/.local/bin/.agy.real.patched` tracks the last-patched mtime. When `agy.real` is newer (self-update detected), Track A re-runs automatically before launch. Patch log: `/tmp/agy_patch.log`.
+
+#### 3. Manual Method: Static Patching via Rizin
+If manually locating check offsets:
 ```bash
 # Non-interactive search and relative JMP patch
 rizin -w -c "s <offset_of_validation_check>; wx e9b300000090; q" /path/to/binary
@@ -83,7 +107,7 @@ rizin -w -c "s <offset_of_validation_check>; wx e9b300000090; q" /path/to/binary
 ### Track B: Shared Library preloader
 For mid-execution instruction exceptions, inject the emulation library. 
 
-**Note on Stack Alignment:** Option B (Experimental JIT Mode) is fully hardened against non-aligned stack frames (such as the Go runtime's non-standard 8-byte alignment) because the C helper callback uses `__attribute__((force_align_arg_pointer))` to dynamically realign the stack pointer to 16 bytes.
+**Note on Stack Alignment:** Experimental JIT Mode is fully hardened against non-aligned stack frames (such as the Go runtime's non-standard 8-byte alignment) because the C helper callback uses `__attribute__((force_align_arg_pointer))` to dynamically realign the stack pointer to 16 bytes.
 
 ```bash
 # 1. Compile all targets
@@ -92,10 +116,10 @@ make
 # 2. Install targets atomically (prevents linker crashes on running instances)
 make install
 
-# 3. Preload the dynamic library (Safe Mode Option A is default)
+# 3. Preload the dynamic library (Safe Mode — default, SELinux/AppArmor compliant)
 LD_PRELOAD=/home/michael/sigill_emulator_v2.so /path/to/binary
 
-# 4. Preload in JIT Experimental Mode Option B (if security policies permit)
+# 4. Preload in Experimental JIT Mode (10x faster; requires mprotect / writable code pages)
 EMU_MODE=experimental LD_PRELOAD=/home/michael/sigill_emulator_v2.so /path/to/binary
 ```
 

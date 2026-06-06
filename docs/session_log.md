@@ -207,5 +207,34 @@ Below is the log of the latest engineering sprint focusing on binary upgrade res
         `__attribute__((force_align_arg_pointer))`
     *   This forces the GCC/Clang compiler to dynamically align the stack pointer `RSP` to a 16-byte boundary (`and $-16, %rsp`) in the prologue of the helper callback, ensuring all emulated vector operations are perfectly aligned and execute with absolute stability.
 
+---
+
+## 🌟 Auto-Update Integration & Patcher Hardening (Commit v1.0.20)
+
+This sprint addressed a gap identified after `agy` self-updated on June 4, 2026: the new binary silently replaced `agy.real` with an unpatched version, requiring manual re-patching.
+
+### 1. Multi-Signature Patcher (`patch_agy.py`)
+*   **Problem**: The single primary signature `\x55\x48\x89\xe5\x53\x50\xe8.{4}\x8b\x05.{4}\xa9\x00\x00\x04\x00\x0f\x84` works for all known builds but provides no resilience if the Go compiler changes the prologue structure or cpu feature bit layout in a future version.
+*   **Solution**:
+    *   Added 4 signature variants tried in priority order: `primary-aes-bit18` (original), `generic-feature-check` (wildcards TEST mask — survives future Go bit reassignment), `no-push-rax` (shorter frame variant), `test-al-byte-check` (compact `TEST AL,imm8` form for pclmulqdq-style checks).
+    *   Added 5 epilogue variants: `add rsp,8/16/24` + pop/ret combinations. The function epilogue has been `4883c4085b5dc3` across all 4 tested versions (May 2026–Jun 2026) but the patcher no longer hard-depends on it.
+    *   Added explicit **already-patched detection** before signature scanning: searches for `\xe9.{4}\x90` (our own JMP+NOP fingerprint) in the expected position. Exits `0` cleanly without re-reading the binary on subsequent launches.
+    *   Added binary fingerprinting in log output (sha256, size, mtime) for future diagnostics.
+    *   Exit codes: `0` = patched or already patched, `1` = incompatible binary. This allows callers to distinguish genuine failure from success.
+    *   **Generic**: the patcher works on any compatible Go binary — not tied to `agy` specifically.
+*   **Cross-version pattern analysis** (confirming signature stability):
+    | Version | Sig offset | jmp_site | Epilogue distance |
+    |---|---|---|---|
+    | May 22 | `0x74B9180` | `+11` | `0xB3` (179 bytes) |
+    | May 24 | `0x74D0F00` | `+11` | `0xB3` |
+    | Jun 2  | `0x75E9D20` | `+11` | `0xB3` |
+    | Jun 4  | `0x766A3C0` | `+11` | `0xB3` |
+
+### 2. Auto-Update Wrapper (`~/.local/bin/agy`)
+*   **Problem**: When `agy` self-updates, it replaces `agy.real` in place. The wrapper only set `LD_PRELOAD`; it had no mechanism to re-apply Track A after an update.
+*   **Solution**: Updated the wrapper to detect updates via a marker file (`~/.local/bin/.agy.real.patched`). On each launch, it compares the `agy.real` mtime against the marker. If `agy.real` is newer (self-update detected), it runs `patch_agy.py` automatically and refreshes the marker. Patch stdout is redirected to `/tmp/agy_patch.log`.
+*   **Idempotent**: if the binary is already patched (patcher exits 0 via already-patched fast-path), the marker is still touched — no wasted work on subsequent launches.
+*   Both tracks now run automatically: Track A on update detection, Track B (LD_PRELOAD) on every launch.
+
 
 

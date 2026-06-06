@@ -15,6 +15,8 @@ You are operating in a workspace that features the compatibility toolkit `sigill
   - `src/sigill_emulator.c`: Signal hook preloader.
   - `benchmark/benchmark.c`: Test orchestrator.
   - `Makefile`: Build systems.
+  - `/home/michael/patch_agy.py`: Multi-signature static patcher (Track A). Works on any compatible Go binary.
+  - `/home/michael/.local/bin/agy`: Wrapper script — auto-applies Track A patch on binary update, then launches with LD_PRELOAD (Track B). Patch log: `/tmp/agy_patch.log`. Marker: `~/.local/bin/.agy.real.patched`.
 - **Emulation Modes**:
   - **Option A (Safe Mode - DEFAULT)**: Software trap-and-emulate via SIGILL. Static memory (~56 KB), SELinux/AppArmor compliant.
   - **Option B (Experimental Mode - `EMU_MODE=experimental`)**: JIT dynamic code patching using Trampoline Islands. Bypasses kernel overhead but violates strict W^X / SELinux `execmem` rules.
@@ -22,6 +24,7 @@ You are operating in a workspace that features the compatibility toolkit `sigill
   - `v1` (`sigill_emulator_v1.so`): x86-64 Legacy (circa 2003).
   - `v2` (`sigill_emulator_v2.so`): x86-64-v2 (circa 2009, SSE4.2/POPCNT).
   - `Native` (`sigill_emulator.so`): Native host auto-optimized.
+- **Patcher signature variants** (tried in order): `primary-aes-bit18`, `generic-feature-check`, `no-push-rax`, `test-al-byte-check`. Exit 0 on success or already-patched; exit 1 on incompatible binary.
 </context_sigill_emulator>
 ```
 
@@ -38,10 +41,12 @@ When diagnosing a crash or optimizing compilation, follow this decision tree to 
         [CPUID / Early Gate Check]       [Mid-loop execution]
                      |                           |
                      v                           v
-              Static Patching              Select Emulator
-             (via Rizin/Capstone)                |
+        Static Patching (Track A)          Select Emulator
+        python3 patch_agy.py <bin>               |
+        (auto-runs via agy wrapper               |
+         on each binary update)                  |
                                                  v
-                                    [Assess Security Envrionment]
+                                    [Assess Security Environment]
                                                  |
                        +-------------------------+-------------------------+
                        |                                                   |
@@ -88,8 +93,16 @@ for insn in md.disasm(code, crash_address):
 '
 ```
 
-### B. Rizin Automated Jump Patching
-To write static bypass patches to disk automatically:
+### B. Static Patcher (Preferred over Rizin)
+Run the multi-signature auto-patcher — it handles already-patched detection, epilogue search, and backup automatically:
+```bash
+python3 /home/michael/patch_agy.py /path/to/binary
+# exit 0 = patched or already patched; exit 1 = incompatible
+# check /tmp/agy_patch.log for sha256/offset/bytes detail
+```
+
+### C. Rizin Manual Jump Patching
+Use only when `patch_agy.py` fails and you have a known offset:
 ```bash
 # Apply relative JMP (E9 B3 00 00 00) + NOP (90) to validation offset in write-mode (-w)
 rizin -w -c "s <validation_offset>; wx e9b300000090; q" /path/to/binary
