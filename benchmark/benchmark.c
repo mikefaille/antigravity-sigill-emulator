@@ -27,10 +27,13 @@ const char *resolve_library(const char *lib_name, char *resolved_path, size_t ma
     if (file_exists(resolved_path)) {
         return resolved_path;
     }
-    // Check /home/michael next
-    snprintf(resolved_path, max_len, "/home/michael/%s", lib_name);
-    if (file_exists(resolved_path)) {
-        return resolved_path;
+    // Check HOME environment variable next
+    const char *home = getenv("HOME");
+    if (home != NULL) {
+        snprintf(resolved_path, max_len, "%s/%s", home, lib_name);
+        if (file_exists(resolved_path)) {
+            return resolved_path;
+        }
     }
     return NULL;
 }

@@ -31,7 +31,7 @@ To apply the static bypass and compile the emulator, we mapped the binary struct
 
 ### 1. Locating the Code Section (.text)
 We ran `readelf` on the binary to find where the executable machine code lies:
-* Command: `readelf -S /home/michael/.local/bin/agy`
+* Command: `readelf -S ~/.local/bin/agy`
 * Result: `.text` section starts at address `0x04b13000` with file offset `0x04b13000`.
 
 ### 2. Identifying the Crash Address
@@ -71,8 +71,8 @@ This bypasses Go's CPU check validation function while allowing `cpu.Initialize`
 We saved the patched binary as `agy.real` and created a shell wrapper `agy`:
 ```bash
 #!/bin/bash
-export LD_PRELOAD=/home/michael/sigill_emulator.so
-exec /home/michael/.local/bin/agy.real "$@"
+export LD_PRELOAD=~/sigill_emulator.so
+exec ~/.local/bin/agy.real "$@"
 ```
 This ensures the emulation layer is injected into the program memory space before `main` starts executing.
 
@@ -99,7 +99,7 @@ Below is the chronological log of engineering sprints, including precise commit 
 ### 1. JIT Dynamic Code Patching & Compiler flag optimizations
 *   **Commit Hash**: `1d79599`
 *   **Engineering Changes**:
-    *   Optimized compilation flags inside the [Makefile](file:///home/michael/src/agy-compat-toolkit/Makefile) to use `-march=native`, `-O3`, and Link Time Optimization (`-flto`) for the production library target `sigill_emulator.so`.
+    *   Optimized compilation flags inside the [Makefile](../Makefile) to use `-march=native`, `-O3`, and Link Time Optimization (`-flto`) for the production library target `sigill_emulator.so`.
     *   Designed and implemented the **Option B (Experimental)** Dynamic Code Patching (Trap-and-Patch) engine.
     *   To overcome x86-64 32-bit relative jump limit constraints (`+/- 2GB`), implemented a **Trampoline Island Allocator** (`allocate_trampoline_island`) that scans and dynamically allocates executable pages via `mmap` near the call site.
     *   Wrote 16-byte register-preserving JIT jumps:
@@ -110,7 +110,7 @@ Below is the chronological log of engineering sprints, including precise commit 
         ret
         ```
     *   Overwrote trapped instruction bytes at `RIP` using atomic signal traps and relative `call` instructions targeting the island stub, bypassing hardware interrupts on subsequent runs.
-*   **Code Reference**: [src/sigill_emulator.c](file:///home/michael/src/agy-compat-toolkit/src/sigill_emulator.c#L449-L506) (`allocate_trampoline_island` and `resolve_mem_addr_fast_trampoline`), [src/sigill_emulator.c](file:///home/michael/src/agy-compat-toolkit/src/sigill_emulator.c#L636-L690) (`patch_code`).
+*   **Code Reference**: [src/sigill_emulator.c](../src/sigill_emulator.c#L449-L506) (`allocate_trampoline_island` and `resolve_mem_addr_fast_trampoline`), [src/sigill_emulator.c](../src/sigill_emulator.c#L636-L690) (`patch_code`).
 
 ### 2. Multi-Architecture Dynamic Builds, Safety Switches & Interactive Help
 *   **Commit Hash**: `2f74386`
@@ -120,13 +120,13 @@ Below is the chronological log of engineering sprints, including precise commit 
         *   `sigill_emulator_v2.so` targeting `x86-64-v2` (circa 2009) via `-march=x86-64-v2` for processors featuring SSE4.1/4.2.
     *   Implemented a runtime mode toggle via environment variables: defaults to **Safe Mode (Option A)**, switching to **Experimental Mode (Option B)** only when `EMU_MODE=experimental` or `EMU_EXPERIMENTAL=1` is supplied.
     *   Wrote an argument and environment parser (`check_help`) that inspects `/proc/self/cmdline` and `EMU_HELP`/`HELP` env variables to display a comprehensive CLI usage manual before exiting cleanly with status `0`.
-*   **Code Reference**: [src/sigill_emulator.c](file:///home/michael/src/agy-compat-toolkit/src/sigill_emulator.c#L1031-L1086) (`check_help`).
+*   **Code Reference**: [src/sigill_emulator.c](../src/sigill_emulator.c#L1031-L1086) (`check_help`).
 
 ### 3. Documentation Restructuring & Relative Link Portability
 *   **Commit Hash**: `b2ecc44`
 *   **Engineering Changes**:
     *   Moved documentation resources (`LEARNING_GUIDE.md`, `SKILL.md`, `AGENTS.md`, `benchmark_results.md`, `session_log.md`) to a unified `docs/` subdirectory.
-    *   Cleaned all absolute local references (`file:///home/michael/...` paths) in the documentation and replaced them with portable relative links to allow the repo to be cloned and read across any engineering workspace.
+    *   Cleaned all absolute local references (`file:///home/<user>/...` paths) in the documentation and replaced them with portable relative links to allow the repo to be cloned and read across any engineering workspace.
 
 ### 4. Compiler Performance Profiling
 *   **Commit Hash**: `d0c9cc5`
@@ -142,19 +142,19 @@ Below is the chronological log of engineering sprints, including precise commit 
     *   Upgraded the signal handler to pre-parse addressing mode elements (RIP relative state, base/index register mappings, scale, and displacements) on the first cache miss (via `parse_mem_operand`).
     *   Cached these pre-parsed properties directly in the direct-mapped `cache_entry` table.
     *   On cache hits, `resolve_mem_addr_fast` resolves the memory address inline using cached values, saving **~100 ns** of CPU execution time per trap.
-*   **Code Reference**: [src/sigill_emulator.c](file:///home/michael/src/agy-compat-toolkit/src/sigill_emulator.c#L327-L443) (`cache_entry` structure, `parse_mem_operand`, and `resolve_mem_addr_fast`).
+*   **Code Reference**: [src/sigill_emulator.c](../src/sigill_emulator.c#L327-L443) (`cache_entry` structure, `parse_mem_operand`, and `resolve_mem_addr_fast`).
 
 ---
 
 ## 🌟 Multi-Target Automated Orchestrator Benchmarking
 
 *   **Engineering Changes**:
-    *   Re-engineered the test utility [benchmark/benchmark.c](file:///home/michael/src/agy-compat-toolkit/benchmark/benchmark.c).
+    *   Re-engineered the test utility [benchmark/benchmark.c](../benchmark/benchmark.c).
     *   Previously, running benchmarks required manual preloading of individual targets.
     *   Upgraded the benchmark to act as a **Parent Orchestrator** which automatically forks, sets appropriate preloads and modes in the environment, runs child subprocesses of itself, and parses their timing results.
     *   Runs 7 test configurations including an un-preloaded Baseline (confirming the expected `SIGILL` crash), and both Safe (Option A) and Experimental (Option B) modes for `v1`, `v2`, and `Native` builds.
     *   Presents a beautifully formatted ASCII comparison table compiling elapsed time, traps per second, and avg latency directly to the developer at run time.
-*   **Code Reference**: [benchmark/benchmark.c](file:///home/michael/src/agy-compat-toolkit/benchmark/benchmark.c)
+*   **Code Reference**: [benchmark/benchmark.c](../benchmark/benchmark.c)
 
 ---
 
@@ -192,7 +192,7 @@ Below is the log of the latest engineering sprint focusing on binary upgrade res
 ### 1. Robust Signature-Based Auto-Patcher (`patch_agy.py`)
 *   **Engineering Changes**:
     *   Discovered that newer versions of `agy` (such as the 177M version 1.0.4) compiled with modern compilers bypass simple struct-based checks and instead inline fail-fast checks into runtime and package initialize routines.
-    *   Designed and implemented a state-of-the-art **Byte-Signature Matcher** inside `/home/michael/patch_agy.py`.
+    *   Designed and implemented a state-of-the-art **Byte-Signature Matcher** inside `scripts/patch_agy.py` (copied to `~/patch_agy.py` on install).
     *   The script uses a byte regular expression to dynamically locate the prologue of Go's `cpu.Initialize` function:
         `\x55\x48\x89\xe5\x53\x50\xe8.{4}\x8b\x05.{4}\xa9\x00\x00\x04\x00\x0f\x84`
     *   Once found, it dynamically scans forward to locate the function's epilogue (`\x48\x83\xc4\x08\x5b\x5d\xc3`) and computes the relative target address.

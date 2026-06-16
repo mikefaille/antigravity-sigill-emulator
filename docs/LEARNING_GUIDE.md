@@ -276,11 +276,11 @@ To optimize for different hardware specifications, compile targeting the appropr
 If you copy the newly compiled shared library directly over the existing path where a running process (like `agy`) has preloaded it using `LD_PRELOAD`:
 ```bash
 # DO NOT DO THIS directly on an active preload target!
-cp sigill_emulator.so /home/michael/sigill_emulator.so
+cp sigill_emulator.so ~/sigill_emulator.so
 ```
 You will encounter this linker error:
 ```text
-ERROR: ld.so: object '/home/michael/sigill_emulator.so' from LD_PRELOAD cannot be preloaded (cannot open shared object file): ignored.
+ERROR: ld.so: object '~/sigill_emulator.so' from LD_PRELOAD cannot be preloaded (cannot open shared object file): ignored.
 ```
 
 #### Why does this happen?
@@ -290,8 +290,8 @@ When you use `cp`, it opens the destination file and truncates it to 0 bytes, th
 To prevent this race condition, you must replace the shared library **atomically** using the filesystem's rename operation. Renaming changes the directory entry pointing to the file inode in a single, atomic operation, ensuring that any process attempting to load it will either get the complete old version or the complete new version:
 ```bash
 # Correct atomic sequence:
-cp sigill_emulator.so /home/michael/sigill_emulator.so.tmp
-mv /home/michael/sigill_emulator.so.tmp /home/michael/sigill_emulator.so
+cp sigill_emulator.so ~/sigill_emulator.so.tmp
+mv ~/sigill_emulator.so.tmp ~/sigill_emulator.so
 ```
 This is fully automated in the project's [Makefile](../Makefile) under the `install` target.
 
@@ -516,7 +516,7 @@ To bypass this we replace the `mov eax, [cpu_features]` instruction (6 bytes) wi
 The automated patcher (`patch_agy.py`) handles all of the address arithmetic and byte-signature searching for you. It is the right tool for everyday use.
 
 ```bash
-python3 /home/michael/patch_agy.py /home/michael/.local/bin/agy.real
+python3 ~/patch_agy.py ~/.local/bin/agy.real
 ```
 
 A successful run prints the matched signature, the file offset of the patch site, the original bytes, and the patch bytes written. The original binary is saved as `agy.real.bak` before any changes are made. If the binary has already been patched, the tool detects its own JMP fingerprint and exits without touching the file.

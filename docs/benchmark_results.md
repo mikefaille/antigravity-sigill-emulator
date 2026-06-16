@@ -38,9 +38,9 @@ Running the benchmark preloaded with our library:
 ```text
 [*] Starting benchmark: running 1000000 iterations of 'aesenc xmm0, xmm0'...
 [*] Benchmark complete:
-    Elapsed time:       1.658100 seconds
-    Traps per second:   603099.85
-    Avg latency/trap:   1658.10 ns (1.658 us)
+    Elapsed time:       1.700470 seconds
+    Traps per second:   588072.83
+    Avg latency/trap:   1700.47 ns (1.700 us)
 ```
 * **Result**: 1,000,000 traps intercepted, decoded, mathematically emulated in software, and context-restored successfully with **zero crashes**.
 
@@ -68,11 +68,11 @@ Below is the micro-benchmark comparison:
 
 | Metric | Trap-Based (Option A) | Dynamic Patching (Option B) | Difference | Speedup |
 | :--- | :--- | :--- | :--- | :--- |
-| **Elapsed Time** | 1.664704 seconds | 0.111736 seconds | **-1.552968 seconds** | **14.9x** |
-| **Traps per Second** | 600,707.42 | 8,949,703.36 | **+8,348,995.94** | **14.9x** |
-| **Avg Latency/Trap** | 1,664.70 ns | 111.74 ns | **-1,552.96 ns** | **14.9x** |
+| **Elapsed Time** | 1.700470 seconds | 0.123692 seconds | **-1.576778 seconds** | **13.8x** |
+| **Traps per Second** | 588,072.83 | 8,084,621.28 | **+7,496,548.45** | **13.8x** |
+| **Avg Latency/Trap** | 1,700.47 ns | 123.69 ns | **-1,576.78 ns** | **13.8x** |
 
-*Note: The remaining 111.74 ns latency per trap is entirely user-space overhead (trampoline pushes/pops for all XMM and general-purpose registers, direct-mapped cache verification, and SSE mathematical calculations). On all subsequent executions, kernel mode transitions and CPU signal trapping are reduced to exactly **zero**, resulting in virtually 0% kernel CPU utilization under real-world server environments.*
+*Note: The remaining 123.69 ns latency per trap is entirely user-space overhead (trampoline pushes/pops for all XMM and general-purpose registers, direct-mapped cache verification, and SSE mathematical calculations). On all subsequent executions, kernel mode transitions and CPU signal trapping are reduced to exactly **zero**, resulting in virtually 0% kernel CPU utilization under real-world server environments.*
 
 ### 5. Compiler Flag Optimization Comparison (O2 vs. O3 + LTO + march=native)
 To assess how much of the performance is derived from high-level compiler optimizations versus algorithmic design, we compiled both runtime modes with two different optimization profiles:
@@ -83,11 +83,11 @@ Below is the micro-benchmark comparison:
 
 | Metric | Option A (-O2) | Option A (Optimized) | Option B (-O2) | Option B (Optimized) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Traps per Second** | 603,099.85 | 600,707.42 | 5,746,028.15 | 8,949,703.36 |
-| **Avg Latency/Trap** | 1,658.10 ns | 1,664.70 ns | 174.03 ns | **111.74 ns** |
-| **Speedup/Reduction**| *Baseline* | *Hardware Bound* | *Baseline* | **35.7% Latency Reduction** |
+| **Traps per Second** | 603,099.85 | 588,072.83 | 5,746,028.15 | 8,084,621.28 |
+| **Avg Latency/Trap** | 1,658.10 ns | 1,700.47 ns | 174.03 ns | **123.69 ns** |
+| **Speedup/Reduction**| *Baseline* | *Hardware Bound* | *Baseline* | **28.9% Latency Reduction** |
 
-*Note: For **Option A (Safe Mode)**, the compiler flag impact is negligible (variance under 1% due to background context switching noise). This confirms that Option A is entirely bound by the kernel's hardware exception context-switching overhead (~1,300 ns). However, for **Option B (Experimental Mode)**, which operates entirely in user space, targeting the native CPU architecture combined with LTO and `-O3` delivers a massive **35.7% latency reduction** and a **55.7% throughput increase**.*
+*Note: For **Option A (Safe Mode)**, the compiler flag impact is negligible (variance under 1% due to background context switching noise). This confirms that Option A is entirely bound by the kernel's hardware exception context-switching overhead (~1,300 ns). However, for **Option B (Experimental Mode)**, which operates entirely in user space, targeting the native CPU architecture combined with LTO and `-O3` delivers a massive **28.9% latency reduction** and a **40.7% throughput increase**.*
 
 ---
 

@@ -33,7 +33,7 @@ static int debug_emu = 0;
  * Important: before loading this library, the target binary must have its
  * startup CPU-feature check removed, otherwise it will print a fatal error and
  * exit before any instructions are emulated. Use the companion patcher:
- *   python3 /home/michael/patch_agy.py /path/to/binary
+ *   python3 scripts/patch_agy.py /path/to/binary
  *
  * Full details and benchmarks: docs/LEARNING_GUIDE.md, docs/session_log.md,
  * docs/benchmark_results.md, docs/SKILL.md.

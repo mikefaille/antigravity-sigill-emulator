@@ -15,8 +15,8 @@ You are operating in a workspace that features the compatibility toolkit `sigill
   - `src/sigill_emulator.c`: Signal hook preloader.
   - `benchmark/benchmark.c`: Test orchestrator.
   - `Makefile`: Build systems.
-  - `/home/michael/patch_agy.py`: Multi-signature static patcher (Track A). Works on any compatible Go binary.
-  - `/home/michael/.local/bin/agy`: Wrapper script — auto-applies Track A patch on binary update, then launches with LD_PRELOAD (Track B). Patch log: `/tmp/agy_patch.log`. Marker: `~/.local/bin/.agy.real.patched`.
+  - `scripts/patch_agy.py` (or `~/patch_agy.py`): Multi-signature static patcher (Track A). Works on any compatible Go binary.
+  - `~/.local/bin/agy`: Wrapper script — auto-applies Track A patch on binary update, then launches with LD_PRELOAD (Track B). Patch log: `/tmp/agy_patch.log`. Marker: `~/.local/bin/.agy.real.patched`.
 - **Emulation Modes**:
   - **Option A (Safe Mode - DEFAULT)**: Software trap-and-emulate via SIGILL. Static memory (~56 KB), SELinux/AppArmor compliant.
   - **Option B (Experimental Mode - `EMU_MODE=experimental`)**: JIT dynamic code patching using Trampoline Islands. Bypasses kernel overhead but violates strict W^X / SELinux `execmem` rules.
@@ -96,7 +96,7 @@ for insn in md.disasm(code, crash_address):
 ### B. Static Patcher (Preferred over Rizin)
 Run the multi-signature auto-patcher — it handles already-patched detection, epilogue search, and backup automatically:
 ```bash
-python3 /home/michael/patch_agy.py /path/to/binary
+python3 ~/patch_agy.py /path/to/binary
 # exit 0 = patched or already patched; exit 1 = incompatible
 # check /tmp/agy_patch.log for sha256/offset/bytes detail
 ```

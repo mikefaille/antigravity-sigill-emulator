@@ -8,10 +8,10 @@ TARGET_V1 = sigill_emulator_v1.so
 TARGET_V2 = sigill_emulator_v2.so
 
 SRC = src/sigill_emulator.c
-INSTALL_DIR = /home/michael
+INSTALL_DIR ?= $(HOME)
 VERSION ?= v1.0.20
 
-RELEASE_FILES = src/sigill_emulator.c Makefile README.md docs/LEARNING_GUIDE.md docs/SKILL.md scripts/find_bad_insns.py docs/session_log.md docs/AGENTS.md pyproject.toml uv.lock LICENSE benchmark/benchmark.c docs/benchmark_results.md .gitignore AGENTS.md skills/agy-compat/SKILL.md
+RELEASE_FILES = src/sigill_emulator.c Makefile README.md docs/LEARNING_GUIDE.md docs/SKILL.md scripts/find_bad_insns.py scripts/patch_agy.py docs/session_log.md docs/AGENTS.md pyproject.toml uv.lock LICENSE benchmark/benchmark.c docs/benchmark_results.md .gitignore AGENTS.md skills/agy-compat/SKILL.md
 
 .PHONY: all clean install benchmark release
 
@@ -36,6 +36,9 @@ install: $(TARGET) $(TARGET_V1) $(TARGET_V2)
 	mv $(INSTALL_DIR)/$(TARGET_V1).tmp $(INSTALL_DIR)/$(TARGET_V1)
 	cp $(TARGET_V2) $(INSTALL_DIR)/$(TARGET_V2).tmp
 	mv $(INSTALL_DIR)/$(TARGET_V2).tmp $(INSTALL_DIR)/$(TARGET_V2)
+	cp scripts/patch_agy.py $(INSTALL_DIR)/patch_agy.py.tmp
+	mv $(INSTALL_DIR)/patch_agy.py.tmp $(INSTALL_DIR)/patch_agy.py
+	chmod +x $(INSTALL_DIR)/patch_agy.py
 
 release: clean all
 	tar -czf agy-compat-toolkit-$(VERSION).tar.gz $(RELEASE_FILES)

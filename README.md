@@ -29,7 +29,7 @@ This repository provides a high-performance, dynamic in-process emulator to bypa
 
 Historically, executing compiled binaries with unsupported instructions on legacy hardware required full-system emulation layers like **Intel Software Development Emulator (SDE)**:
 ```bash
-sde64 -skx -emit-illegal-insts 0 -- /home/michael/.local/bin/agy
+sde64 -skx -emit-illegal-insts 0 -- ~/.local/bin/agy
 ```
 While Intel SDE successfully emulates modern instructions, it does so via **Dynamic Binary Instrumentation (DBI)**. SDE must translate and rewrite every single instruction executed by the process on the fly, introducing massive **50x to 100x CPU execution latency slowdowns**. This is particularly severe because `agy` uses intensive hardware AES-NI instructions solely for internal map hashing functions during key lookups. Full emulation of all non-cryptographic instructions is highly wasteful.
 
@@ -71,14 +71,14 @@ Compile the compatibility library and install it to your user directory. This au
 # Build all library targets
 make
 
-# Install all target libraries to /home/michael/
+# Install all target libraries (defaults to ~/):
 make install
 ```
 
 ### Step 3: Patch the Binary (Track A — One-time Static Fix)
 Before running, apply the static CPU validation bypass. This removes the startup gate that kills the process immediately on old CPUs:
 ```bash
-python3 /home/michael/patch_agy.py /path/to/binary.real
+python3 ~/patch_agy.py /path/to/binary.real
 ```
 Exit `0` means success (or already patched). The original binary is backed up as `binary.real.bak` on the first run.
 
@@ -88,28 +88,28 @@ Execute your target program preloaded with one of the compatibility libraries:
 #### 1. Safe Mode (Default)
 Pure trap-and-emulate via `SIGILL` signal handling. Memory pages remain strictly read-only — 100% compliant with SELinux/AppArmor and W^X policies:
 ```bash
-LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
+LD_PRELOAD=~/sigill_emulator.so /path/to/binary.real
 ```
 
 #### 2. Experimental Mode (10x Faster, Requires Writable Code Pages)
 Rewrites instruction pages in RAM at runtime using JIT Trampoline Islands. Eliminates the kernel context switch after the first trap, yielding a **10x+ speedup** (~110 ns vs ~1,650 ns). Requires `mprotect` — not compatible with strict SELinux `execmem` policies:
 ```bash
-EMU_MODE=experimental LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
+EMU_MODE=experimental LD_PRELOAD=~/sigill_emulator.so /path/to/binary.real
 ```
 
 #### 3. Interactive Help Menu
 Print the built-in help guide linking back to the GitHub project:
 ```bash
 # Run with --help flag
-LD_PRELOAD=/home/michael/sigill_emulator.so ./your_program --help
+LD_PRELOAD=~/sigill_emulator.so ./your_program --help
 
 # Or trigger using the EMU_HELP environment variable:
-EMU_HELP=1 LD_PRELOAD=/home/michael/sigill_emulator.so ./your_program
+EMU_HELP=1 LD_PRELOAD=~/sigill_emulator.so ./your_program
 ```
 
 *Tip: To see active emulation traces in your console, run with `DEBUG_EMU=1`:*
 ```bash
-DEBUG_EMU=1 LD_PRELOAD=/home/michael/sigill_emulator.so /path/to/binary.real
+DEBUG_EMU=1 LD_PRELOAD=~/sigill_emulator.so /path/to/binary.real
 ```
 
 ### Step 5: Configure Permanently — Wrapper Script (Recommended)
@@ -125,18 +125,18 @@ No further configuration is needed if you installed via this wrapper.
 #### Alternative: Shell Alias (Manual Patch Required After Each Update)
 If you prefer a simple alias without auto-patching, remember to re-run `patch_agy.py` manually whenever `agy` updates itself:
 ```bash
-alias agy="LD_PRELOAD=/home/michael/sigill_emulator.so /home/michael/.local/bin/agy.real"
+alias agy="LD_PRELOAD=~/sigill_emulator.so ~/.local/bin/agy.real"
 ```
 
 #### Alternative: Global Shell Export (Applies to All Processes)
 This automatically preloads the compatibility library for *all* processes launched by your shell. Safe to use since the emulator has negligible overhead on CPUs that don't need it:
 *   **For `bash`:** Add to `~/.bashrc`:
     ```bash
-    export LD_PRELOAD="/home/michael/sigill_emulator.so"
+    export LD_PRELOAD="~/sigill_emulator.so"
     ```
 *   **For `zsh`:** Add to `~/.zshrc`:
     ```bash
-    export LD_PRELOAD="/home/michael/sigill_emulator.so"
+    export LD_PRELOAD="~/sigill_emulator.so"
     ```
 
 Reload your profile to apply:
@@ -158,7 +158,7 @@ source ~/.bashrc  # or ~/.zshrc
 ## 🛠️ Toolkit Components
 
 *   **`src/sigill_emulator.c`**: Core emulator catching `SIGILL` signals, decoding register states, performing software AES/carry-less operations, and returning state.
-*   **`/home/michael/patch_agy.py`**: Multi-signature static patcher (Track A). Patches any compatible Go binary; detects already-patched state; backs up the original. Generic — not tied to `agy` specifically.
+*   **`scripts/patch_agy.py`**: Multi-signature static patcher (Track A) — also copied to `~/patch_agy.py` during installation. Patches any compatible Go binary; detects already-patched state; backs up the original. Generic — not tied to `agy` specifically.
 *   **`~/.local/bin/agy`**: Wrapper script combining Track A (auto-patch on update) + Track B (LD_PRELOAD). Logs to `/tmp/agy_patch.log`. Uses `~/.local/bin/.agy.real.patched` as update marker.
 *   **`scripts/find_bad_insns.py`**: Static analysis instruction scanner. Runs instantly with `uv run scripts/find_bad_insns.py`.
 *   **`benchmark/benchmark.c`**: Trapping test utility looping 1,000,000 AESENC traps.

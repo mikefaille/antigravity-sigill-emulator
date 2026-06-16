@@ -68,7 +68,7 @@ For binaries failing initialization CPU validation tests, patch the conditional 
 #### 1. Recommended Method: Automated Signature-Based Patcher
 Use the Python auto-patcher to patch any compatible Go binary. Run it once after each binary update:
 ```bash
-python3 /home/michael/patch_agy.py /path/to/binary
+python3 ~/patch_agy.py /path/to/binary
 ```
 Exit codes: `0` = success (patched or already patched), `1` = incompatible binary. Patch output (binary sha256, size, mtime, matched signature, patch site) is logged to stdout for diagnostics.
 
@@ -83,16 +83,16 @@ Exit codes: `0` = success (patched or already patched), `1` = incompatible binar
 **Already-patched detection:** Before scanning for unpatched signatures, the patcher looks for its own `JMP+NOP` fingerprint in the expected position. If found, it exits `0` without re-reading or re-patching.
 
 #### 2. Automatic Update Integration (`agy` wrapper)
-The `/home/michael/.local/bin/agy` wrapper script automatically re-applies Track A whenever `agy.real` is replaced by a self-update:
+The `~/.local/bin/agy` wrapper script automatically re-applies Track A whenever `agy.real` is replaced by a self-update:
 ```bash
 REAL=~/.local/bin/agy.real
 MARKER=~/.local/bin/.agy.real.patched
 
 if [ ! -f "$MARKER" ] || [ "$REAL" -nt "$MARKER" ]; then
-    python3 /home/michael/patch_agy.py "$REAL" >/tmp/agy_patch.log 2>&1 && touch "$MARKER"
+    python3 ~/patch_agy.py "$REAL" >/tmp/agy_patch.log 2>&1 && touch "$MARKER"
 fi
 
-LD_PRELOAD=/home/michael/sigill_emulator.so exec "$REAL" "$@"
+LD_PRELOAD=~/sigill_emulator.so exec "$REAL" "$@"
 ```
 The marker file `~/.local/bin/.agy.real.patched` tracks the last-patched mtime. When `agy.real` is newer (self-update detected), Track A re-runs automatically before launch. Patch log: `/tmp/agy_patch.log`.
 
@@ -117,10 +117,10 @@ make
 make install
 
 # 3. Preload the dynamic library (Safe Mode — default, SELinux/AppArmor compliant)
-LD_PRELOAD=/home/michael/sigill_emulator_v2.so /path/to/binary
+LD_PRELOAD=~/sigill_emulator_v2.so /path/to/binary
 
 # 4. Preload in Experimental JIT Mode (10x faster; requires mprotect / writable code pages)
-EMU_MODE=experimental LD_PRELOAD=/home/michael/sigill_emulator_v2.so /path/to/binary
+EMU_MODE=experimental LD_PRELOAD=~/sigill_emulator_v2.so /path/to/binary
 ```
 
 ---
