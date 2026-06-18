@@ -139,3 +139,48 @@ make clean && make && make benchmark
 *   **Safe Mode (Option A)**: Traps per second $\approx 600,000$, Average latency $\approx 1,600 \text{ ns}$.
 *   **Experimental Mode (Option B)**: Traps per second $\approx 8,000,000$, Average latency $\approx 120 \text{ ns}$.
 *   **Failsafe Fallback Check**: If `mprotect` or JIT page allocation fails under strict SELinux/AppArmor, the library must automatically degrade to Option A on a per-instruction basis.
+
+---
+
+## 🟣 5. JVM Targets (Bitwig Studio / OpenJDK)
+
+### 5.1 The JVM Raw Syscall Bypass Problem
+The JVM (OpenJDK 25 / Azul Zulu 25) calls `syscall(SYS_rt_sigaction)` **directly** — not the libc `sigaction()` wrapper — to install its own `crash_handler` for SIGILL. This silently replaces our emulator's handler even with `LD_PRELOAD`. The crash log will show:
+```
+SIGILL: crash_handler in libjvm.so, mask=..., flags=SA_RESTART|SA_SIGINFO, unblocked
+```
+even though `sigill_emulator.so` is visible in the memory map.
+
+**Fix**: A background `pthread` reassert watchdog in `sigill_emulator.c` that polls the kernel SIGILL disposition via raw `syscall(SYS_rt_sigaction, SIGILL, NULL, &current, sizeof(sigset_t))` every 50 ms for 10 s and reinstalls our handler when displaced. See `src/sigill_emulator.c` for the full implementation. Requires `-lpthread` in `LDLIBS`.
+
+### 5.2 Suppress JIT AVX Generation
+```bash
+JDK_JAVA_OPTIONS="-XX:UseAVX=0"   # integer flag, no + prefix
+```
+Stops the JIT compiler from emitting AVX in hotspot-compiled Java code. Does not affect native `.so` libraries (those still need SIGILL emulation). Injection via env var is required because Bitwig's launcher is a compiled C++ ELF binary, not a shell script — no `.vmoptions` file exists.
+
+**Effect on Bitwig Studio 6.0**: Advances startup from ~16.5 s crash to ~28 s before the next native crash.
+
+### 5.3 Compatibility Launcher
+```bash
+# ~/.local/bin/bitwig-compat  (installed and on PATH)
+exec env \
+    JDK_JAVA_OPTIONS="-XX:UseAVX=0" \
+    LD_PRELOAD="${HOME}/sigill_emulator.so${LD_PRELOAD:+:$LD_PRELOAD}" \
+    /usr/bin/bitwig-studio "$@"
+```
+
+### 5.4 Debug Workflow
+```bash
+# Run with opcode trace to find next unhandled instruction
+timeout 60 env JDK_JAVA_OPTIONS="-XX:UseAVX=0" \
+  LD_PRELOAD=~/sigill_emulator.so DEBUG_EMU=1 \
+  bitwig-studio 2>&1 | tee /tmp/bitwig_test.log
+
+# Last [DEBUG_AVX_DECODE] line before crash = next opcode to implement
+tail -30 ~/.BitwigStudio/log/BitwigStudio.log | grep -E "Op=|SIGILL|fatal"
+
+# Decode that offset in the native .so
+objdump -d /opt/bitwig-studio/lib/bitwig-studio/libbitwig-jni.so \
+  | awk '/<HEX_OFFSET>:/{found=1} found{print; if(NR>20)exit}'
+```

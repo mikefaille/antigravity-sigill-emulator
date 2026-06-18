@@ -1,141 +1,177 @@
 ---
-name: agy-compat
-description: Use when analyzing, patching, or debugging compiled Go/C++ binaries (like agy) that crash with SIGILL (illegal instruction) or hardware validation errors (like aes, pclmul, avx) on legacy processors.
+name: avx-emu-compatibility
+description: Guide and architectural instructions for compiling, building, and running AVX/AVX2/FMA/F16C emulation on legacy Intel LGA1366 / Xeon Nehalem architectures. Use when building custom SIGILL translators or integrating SIMDe execution backends for unmodifiable vector binaries.
 ---
 
-# Go Binary CPU Instruction Compatibility Skill
+# AVX Emulation and Compatibility on Legacy Intel LGA1366
 
-This document is the operational playbook for diagnosing, patching, and running compiled Go/C++ binaries on CPUs that lack modern instruction sets (such as `AES-NI`, `PCLMULQDQ`, `AVX`, or `AVX2`).
-
----
-
-## 🟢 1. Problem Classification & Target Selection
-
-### A. Crash Types
-1.  **Early Validation Failures (Fast Fail)**:
-    *   Symptom: Binary prints validation warning and terminates immediately on start:
-        `FATAL ERROR: This binary was compiled with aes enabled, but this feature is not available on this processor (go/sigill-fail-fast).`
-    *   Action: **Static Patching** (Track A).
-2.  **Raw SIGILL Exceptions**:
-    *   Symptom: Binary executes initially, but crashes during cryptographically heavy execution loops:
-        `Illegal instruction (core dumped)`
-    *   Action: **Signal Emulation Preload** (Track B).
-
-### B. Library Target Selection
-Choose the correct precompiled shared object based on the virtualized or physical processor architecture:
-*   `sigill_emulator_v1.so` (`x86-64` generic): Target for pre-2009 processors (Nehalem precursor / Core 2).
-*   `sigill_emulator_v2.so` (`x86-64-v2` standard): Target for Nehalem, Westmere, or guest VMs without CPU pass-through (requires SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT).
-*   `sigill_emulator.so` (`native` host): Autodetects and optimizes code generation for the compiler host.
+This skill provides verified architectural guidance, safety rules, and execution playbooks for emulating AVX, AVX2, FMA, and F16C instruction sets on legacy Xeon Nehalem/Westmere (LGA1366) CPUs that physically lack AVX registers and opcodes.
 
 ---
 
-## 🟡 2. Diagnostic & Analysis Commands (Structured)
+## 1. Core Architectural Separation
 
-### Step 1: Extract Crash Address (`RIP`)
-Run the binary inside GDB in non-interactive batch mode to dump the crash context:
-```bash
-gdb -batch -ex "run" -ex "bt" --args /path/to/binary [args...]
+A performant and robust compatibility emulator must split the runtime into two distinct, isolated layers:
+
+```text
+SIGILL Signal Handler (ld.so)
+       ↓
+AVX Architectural Layer (src/avx/)
+  - VEX Prefix / ModRM / SIB Decoder
+  - Register State (YMM Upper halves)
+  - Context & RIP advancement
+       ↓
+SIMDe Mathematical Layer (src/math/)
+  - Portably lowered to Nehalem SSE4.2
+  - Explicit saturating arithmetic
 ```
 
-### Step 2: Compute Target File Offset
-Identify the mapping base load address to compute the physical offset inside the executable file:
-1. Run `info proc mappings` in GDB.
-2. Locate the first address matching the executable (`r-xp`) mapping of the binary.
-3. Compute offset:
-   $$\text{File Offset} = \text{Crash Address (RIP)} - \text{Base Load Address}$$
+1. **AVX Architectural Layer**: Responsible for system state, instruction stream decoding, reading/writing `ucontext_t` registers, managing thread-local virtual YMM upper halves, and managing EFLAGS and RIP.
+2. **SIMDe Mathematical Layer**: Uses the SIMD Everywhere (SIMDe) portable header-only library as the math execution backend. SIMDe executes 256-bit operations and portably lowers them to highly optimized, native Nehalem SSE4.x instructions.
 
-### Step 3: Extract Instruction Opcode Bytes
-Run a Capstone disassembler check in Python via `uv` to read the bytes at the calculated file offset:
-```bash
-uv run python3 -c '
-from capstone import *
-with open("/path/to/binary", "rb") as f:
-    f.seek(<computed_file_offset>)
-    code = f.read(16)
-md = Cs(CS_ARCH_X86, CS_MODE_64)
-for insn in md.disasm(code, <crash_address>):
-    print(f"DISASM: 0x{insn.address:x}  {insn.bytes.hex()}  {insn.mnemonic} {insn.op_str}")
-'
+---
+
+## 2. Critical Async-Signal-Safety & Thread-Local Rules
+
+A SIGILL signal handler (especially when preloaded on complex host runtimes like the Java Virtual Machine) runs under strict execution contexts. To prevent deadlocks, recursive crashes, and JVM signals desynchronization:
+
+### 2.1 symbol Pre-Resolution & Validation
+1. **NO `dlsym` inside the handler**: Interposing functions like `sigaction` must pre-resolve their original symbol targets (e.g. `real_sigaction`) inside the shared library's constructor `__attribute__((constructor))` phase.
+2. **Validate `real_sigaction` early**: Resolve the symbol at the very beginning of the constructor and fail/exit explicitly if unavailable:
+   ```c
+   real_sigaction = (orig_sigaction_t)dlsym(RTLD_NEXT, "sigaction");
+   if (!real_sigaction) {
+       static const char message[] = "sigill-emulator: cannot resolve sigaction\n";
+       write(STDERR_FILENO, message, sizeof(message) - 1);
+       _exit(127);
+   }
+   ```
+3. **NO memory allocations**: `malloc` and `free` take global locks and are not async-signal-safe.
+4. **NO `fprintf` or `printf`**: Logging must use stack-allocated, bounded string buffers and the direct, non-blocking `write(2)` system call.
+
+### 2.2 Thread-Local Storage (TLS) Models
+1. **Force `initial-exec` TLS**: Because this library is loaded dynamically through `LD_PRELOAD`, ordinary TLS accesses can fallback to dynamic paths involving `__tls_get_addr`. If the first access occurs inside the signal handler, it can cause loader deadlocks. Always decorate thread-local state with `__attribute__((tls_model("initial-exec")))`:
+   ```c
+   static __thread __attribute__((tls_model("initial-exec"))) volatile sig_atomic_t in_sigill_handler;
+   __thread uint8_t ymm_upper[16][16] __attribute__((tls_model("initial-exec")));
+   ```
+
+---
+
+## 3. Signal Chaining, Virtualization & Safe Fallbacks
+
+The JVM dynamically overrides registered signal handlers during startup. To keep our `SIGILL` emulator alive, the interposer must intercept `sigaction` calls with extreme safety:
+
+### 3.1 Special Disposition Checks
+Check the special handlers and signal mask before forwarding:
+```c
+if (previous.sa_handler == SIG_IGN) {
+    return;
+}
+if (previous.sa_handler == SIG_DFL) {
+    // Restore default handler disposition
+    real_sigaction(sig, &previous, NULL);
+
+    // Unblock the signal in thread signal mask to allow it to be delivered immediately
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, sig);
+    sigprocmask(SIG_UNBLOCK, &mask, NULL);
+
+    // Re-raise the exact signal on the faulting thread using tgkill
+    syscall(SYS_tgkill, getpid(), (pid_t)syscall(SYS_gettid), sig);
+    _exit(128 + sig);
+}
+if (previous.sa_flags & SA_SIGINFO) {
+    previous.sa_sigaction(sig, si, ctx_void);
+} else {
+    previous.sa_handler(sig);
+}
+```
+
+### 3.2 Thread-Correct Fallback Delivery
+Never use process-wide `kill(getpid(), SIGILL)` for thread-default handling as it may target an arbitrary thread. Instead, restore the disposition, unblock the signal in the thread signal mask, and deliver directly to the faulting thread using `SYS_tgkill` (syscall).
+
+### 3.3 Atomic Signal-Action Snapshots (Ring Slots)
+To avoid data races when the host thread replaces signal handlers concurrently with signal delivery, use thread-safe lock-free snapshots. Write the updated handler config to a dormant slot and atomically publish its pointer:
+```c
+static struct sigaction sa_slots[16];
+static volatile int sa_slot_idx = 0;
+static struct sigaction * volatile active_sa = NULL;
+
+// Inside interposed sigaction():
+int next_idx = (sa_slot_idx + 1) % 16;
+sa_slots[next_idx] = *act;
+__sync_synchronize(); // Memory fence
+active_sa = &sa_slots[next_idx];
+sa_slot_idx = next_idx;
+```
+
+### 3.4 siglongjmp-Safe TLS guard
+Chained signal handlers (such as JRE crash reporters or custom exceptions) can perform `siglongjmp()`, never returning to our outer wrapper. Always clear the thread-local recursion guard (`in_sigill_handler = 0;`) immediately *before* calling/chaining to any external handler.
+
+---
+
+## 4. Instruction Mapping & expected Length matching
+
+### 4.1 vzeroupper / vzeroall
+* **Encoding**: Opcode `0x77`, `vex_pp == 0`.
+* **No ModRM**: This instruction contains no ModR/M byte.
+* **Length**: Must consume exactly `vex_len + 1` bytes (3 bytes for 2-byte VEX, 4 bytes for 3-byte VEX) to avoid desynchronizing the IP stream.
+* **Effect**: Zeroes out the virtual thread-local YMM upper registers.
+
+### 4.2 Failsafe Expected Length Match (The Immediate Multi-byte Guard)
+Instructions with trailing immediate bytes and memory displacement operands (such as `vpermq`, `vextractf128`/`vextracti128`, `vinsertf128`/`vinserti128`, `vpermilps`, `vshufps`/`vshufpd`, and `vroundss`/`vroundsd`/`vroundps`/`vroundpd`) are highly vulnerable to size calculation bugs inside standard `resolve_vex_mem_addr` parsers. Always calculate their expected instruction length mathematically:
+```c
+int expected_len;
+if (mod == 3) {
+    expected_len = vex_len + 3; // Prefix + Opcode + ModRM + Immediate
+} else {
+    expected_len = vex_len + 2; // Prefix + Opcode + ModRM
+    if (inst->rm == 4) expected_len += 1; // SIB byte
+    if (mod == 1) expected_len += 1; // 8-bit displacement
+    else if (mod == 2) expected_len += 4; // 32-bit displacement
+    else if (mod == 0 && inst->rm == 5) expected_len += 4; // RIP-relative VMA
+    expected_len += 1; // Trailing immediate byte
+}
+inst->bytes_consumed = expected_len;
 ```
 
 ---
 
-## 🔴 3. Patching & Preload Execution
+## 5. Developer's Playbook: Diagnostic & Build Rules
 
-### Track A: Static Patching (Resilient Auto-Patcher & Rizin)
-For binaries failing initialization CPU validation tests, patch the conditional branch checks.
-
-#### 1. Recommended Method: Automated Signature-Based Patcher
-Use the Python auto-patcher to patch any compatible Go binary. Run it once after each binary update:
-```bash
-python3 ~/patch_agy.py /path/to/binary
-```
-Exit codes: `0` = success (patched or already patched), `1` = incompatible binary. Patch output (binary sha256, size, mtime, matched signature, patch site) is logged to stdout for diagnostics.
-
-**Signature variants tried in order:**
-1. `primary-aes-bit18` — full prologue + `MOV EAX,[RIP+x]` + `TEST EAX,0x40000` + `JE` (stable across all known builds May 2026–present)
-2. `generic-feature-check` — same prologue, wildcards the 4-byte TEST mask (survives future Go cpu feature bit reassignment)
-3. `no-push-rax` — shorter frame variant without `push rax`, jmp_offset=10
-4. `test-al-byte-check` — `TEST AL,imm8` compact form (pclmulqdq-style byte checks)
-
-**Epilogue variants tried in order:** `add rsp,8/16/24` + `pop rbx; pop rbp; ret`, `pop rbx; pop rbp; ret`, `pop rbp; ret`.
-
-**Already-patched detection:** Before scanning for unpatched signatures, the patcher looks for its own `JMP+NOP` fingerprint in the expected position. If found, it exits `0` without re-reading or re-patching.
-
-#### 2. Automatic Update Integration (`agy` wrapper)
-The `~/.local/bin/agy` wrapper script automatically re-applies Track A whenever `agy.real` is replaced by a self-update:
-```bash
-REAL=~/.local/bin/agy.real
-MARKER=~/.local/bin/.agy.real.patched
-
-if [ ! -f "$MARKER" ] || [ "$REAL" -nt "$MARKER" ]; then
-    python3 ~/patch_agy.py "$REAL" >/tmp/agy_patch.log 2>&1 && touch "$MARKER"
-fi
-
-LD_PRELOAD=~/sigill_emulator.so exec "$REAL" "$@"
-```
-The marker file `~/.local/bin/.agy.real.patched` tracks the last-patched mtime. When `agy.real` is newer (self-update detected), Track A re-runs automatically before launch. Patch log: `/tmp/agy_patch.log`.
-
-#### 3. Manual Method: Static Patching via Rizin
-If manually locating check offsets:
-```bash
-# Non-interactive search and relative JMP patch
-rizin -w -c "s <offset_of_validation_check>; wx e9b300000090; q" /path/to/binary
-```
-*(The patch `e9b300000090` writes `jmp <return_block_offset>` plus one `nop` padding).*
-
-### Track B: Shared Library preloader
-For mid-execution instruction exceptions, inject the emulation library. 
-
-**Note on Stack Alignment:** Experimental JIT Mode is fully hardened against non-aligned stack frames (such as the Go runtime's non-standard 8-byte alignment) because the C helper callback uses `__attribute__((force_align_arg_pointer))` to dynamically realign the stack pointer to 16 bytes.
-
-```bash
-# 1. Compile all targets
-make
-
-# 2. Install targets atomically (prevents linker crashes on running instances)
-make install
-
-# 3. Preload the dynamic library (Safe Mode — default, SELinux/AppArmor compliant)
-LD_PRELOAD=~/sigill_emulator_v2.so /path/to/binary
-
-# 4. Preload in Experimental JIT Mode (10x faster; requires mprotect / writable code pages)
-EMU_MODE=experimental LD_PRELOAD=~/sigill_emulator_v2.so /path/to/binary
+### 5.1 Verification Script Target Constraints
+Compile the entire library with explicit Nehalem-specific target constraints, disable dynamic vectorization, and configure tuning options:
+```makefile
+CFLAGS = -fPIC -O2 -march=nehalem -mtune=nehalem -mno-avx -mno-avx2 -mno-fma -mno-bmi -mno-bmi2 -fno-tree-vectorize -Wall -Wextra -fvisibility=hidden
+LDFLAGS = -shared
+LDLIBS = -ldl
 ```
 
----
-
-## 🔵 4. Verification & Testing
-
-Verify that all emulated targets are functioning correctly using the Comparative Test Suite:
-
-```bash
-# Compile and run orchestrator benchmark
-make clean && make && make benchmark
-./run_benchmark
+To ensure absolutely no unsupported instruction patterns are compiled, the `verify` target must scan the disassembled binary for the following mnemonic patterns:
+```makefile
+verify: $(TARGET)
+	@echo "🔍 Auditing $(TARGET) for forbidden CPU instructions..."
+	@if objdump -d $(TARGET) | grep -E '\b(v[a-z0-9]+|andn|bextr|pdep|pext|mulx|shlx|shrx|sarx|aesenc|aesdec|aesenclast|aesdeclast|aesimc|aeskeygenassist|pclmulqdq|rdrand|rdseed|adcx|adox)\b' > /dev/null; then \
+		echo "❌ ERROR: Forbidden instructions found in emulator library!"; \
+		exit 1; \
+	else \
+		echo "✅ No configured forbidden instruction mnemonics detected."; \
+	fi
 ```
 
-### Performance Expectations:
-*   **Safe Mode (Option A)**: Traps per second $\approx 600,000$, Average latency $\approx 1,600 \text{ ns}$.
-*   **Experimental Mode (Option B)**: Traps per second $\approx 8,000,000$, Average latency $\approx 120 \text{ ns}$.
-*   **Failsafe Fallback Check**: If `mprotect` or JIT page allocation fails under strict SELinux/AppArmor, the library must automatically degrade to Option A on a per-instruction basis.
+### 5.2 Signal Chaining Test Suite Guidelines
+The test suite `test_signal_chaining.c` must verify:
+1. `SA_SIGINFO` handler forwarding.
+2. One-argument handler forwarding.
+3. `SIG_DFL` handoff.
+4. `SIG_IGN` handoff.
+5. `SA_RESETHAND` restoration behavior.
+6. Handlers with a non-empty `sa_mask`.
+7. Handlers that modify the supplied `ucontext`.
+8. Handlers that perform `siglongjmp` (and verify recursion guard reset).
+9. Supported VEX instructions do not chain.
+10. Unsupported VEX instructions chain exactly once.
+11. Concurrent `sigaction()` replacement atomic safety.
+12. Comprehensive timeouts to fail instead of hanging on loops.

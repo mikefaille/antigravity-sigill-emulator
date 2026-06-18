@@ -172,12 +172,8 @@ int main(int argc, char *argv[]) {
     // Parent Mode: orchestrate the comparison
     struct config configs[] = {
         {"Baseline (No Emulator)",             NULL,                    "none"},
-        {"v1 (x86-64 Legacy) - Safe",         "sigill_emulator_v1.so", "safe"},
-        {"v1 (x86-64 Legacy) - Experimental", "sigill_emulator_v1.so", "experimental"},
-        {"v2 (x86-64-v2)     - Safe",         "sigill_emulator_v2.so", "safe"},
-        {"v2 (x86-64-v2)     - Experimental", "sigill_emulator_v2.so", "experimental"},
-        {"Native (Host CPU)  - Safe",         "sigill_emulator.so",    "safe"},
-        {"Native (Host CPU)  - Experimental", "sigill_emulator.so",    "experimental"}
+        {"Emulator (Nehalem)   - Safe",         "sigill_emulator.so",    "safe"},
+        {"Emulator (Nehalem)   - Experimental", "sigill_emulator.so",    "experimental"}
     };
     int num_configs = sizeof(configs) / sizeof(configs[0]);
 

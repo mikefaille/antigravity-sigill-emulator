@@ -7,10 +7,143 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <dlfcn.h>
+#include <errno.h>
 
-static struct sigaction old_sa;
-static struct sigaction old_sa_trap;
+#include "avx/avx_emulator.h"
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
+
+static atomic_int reassert_done = 0;
+static pthread_t reassert_tid = 0;
+
+// Thread-safe atomic publication ring buffers for virtualized handlers
+static struct sigaction sa_slots[16];
+static volatile int sa_slot_idx = 0;
+static struct sigaction * volatile active_sa = NULL;
+
+static struct sigaction sa_trap_slots[16];
+static volatile int sa_trap_slot_idx = 0;
+static struct sigaction * volatile active_sa_trap = NULL;
+
 static int debug_emu = 0;
+static int emu_mode_experimental = 0;
+
+typedef int (*orig_sigaction_t)(int, const struct sigaction *, struct sigaction *);
+static orig_sigaction_t real_sigaction = NULL;
+
+static void handler(int sig, siginfo_t *si, void *ctx_void);
+
+static void *reassert_sigill_handler(void *arg) {
+    (void)arg;
+    struct sigaction our_sa;
+    memset(&our_sa, 0, sizeof(our_sa));
+    our_sa.sa_sigaction = handler;
+    sigemptyset(&our_sa.sa_mask);
+    our_sa.sa_flags = SA_SIGINFO | SA_RESTART;
+
+    const int max_iters = 200;  /* 200 × 50ms = 10s */
+    const struct timespec interval = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
+
+    for (int i = 0; i < max_iters; i++) {
+        nanosleep(&interval, NULL);
+        struct sigaction current;
+        memset(&current, 0, sizeof(current));
+        /* Use real_sigaction safely resolved from glibc to query signal disposition */
+        int ret = real_sigaction(SIGILL, NULL, &current);
+        if (ret != 0) continue;
+        if ((current.sa_flags & SA_SIGINFO) && current.sa_sigaction == handler)
+            continue;  /* Still ours */
+        /* Displaced — save JVM handler into ring for chaining */
+        if (current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN) {
+            int next_idx = (sa_slot_idx + 1) % 16;
+            sa_slots[next_idx] = current;
+            __sync_synchronize();
+            active_sa = &sa_slots[next_idx];
+            sa_slot_idx = next_idx;
+        }
+        /* Reinstall via real_sigaction */
+        real_sigaction(SIGILL, &our_sa, NULL);
+    }
+    atomic_store(&reassert_done, 1);
+    return NULL;
+}
+
+static int action_is_ours(const struct sigaction *act) {
+    return act && (act->sa_flags & SA_SIGINFO) && (act->sa_sigaction == handler);
+}
+
+static struct sigaction get_active_sa(int sig) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    if (sig == SIGILL) {
+        struct sigaction *published = active_sa;
+        if (published) {
+            sa = *published;
+        }
+    } else if (sig == SIGTRAP) {
+        struct sigaction *published = active_sa_trap;
+        if (published) {
+            sa = *published;
+        }
+    }
+    return sa;
+}
+
+__attribute__((visibility("default")))
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
+    // Resolve on-demand if the interposer is called before constructor completes
+    if (!real_sigaction) {
+        real_sigaction = (orig_sigaction_t)dlsym(RTLD_NEXT, "sigaction");
+    }
+    if (!real_sigaction) {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    if (signum == SIGILL) {
+        if (action_is_ours(act)) {
+            return real_sigaction(signum, act, oldact);
+        }
+        if (oldact) {
+            *oldact = get_active_sa(SIGILL);
+        }
+        if (act) {
+            int next_idx = (sa_slot_idx + 1) % 16;
+            sa_slots[next_idx] = *act;
+            __sync_synchronize();
+            active_sa = &sa_slots[next_idx];
+            sa_slot_idx = next_idx;
+        }
+        return 0;
+    }
+
+    if (signum == SIGTRAP) {
+        if (!emu_mode_experimental) {
+            return real_sigaction(signum, act, oldact);
+        }
+        if (action_is_ours(act)) {
+            return real_sigaction(signum, act, oldact);
+        }
+        if (oldact) {
+            *oldact = get_active_sa(SIGTRAP);
+        }
+        if (act) {
+            int next_idx = (sa_trap_slot_idx + 1) % 16;
+            sa_trap_slots[next_idx] = *act;
+            __sync_synchronize();
+            active_sa_trap = &sa_trap_slots[next_idx];
+            sa_trap_slot_idx = next_idx;
+        }
+        return 0;
+    }
+
+    return real_sigaction(signum, act, oldact);
+}
 /*
  * Controls which emulation strategy is used when an illegal instruction is caught.
  *
@@ -38,7 +171,6 @@ static int debug_emu = 0;
  * Full details and benchmarks: docs/LEARNING_GUIDE.md, docs/session_log.md,
  * docs/benchmark_results.md, docs/SKILL.md.
  */
-static int emu_mode_experimental = 0;
 
 // AES Tables and S-Box definitions
 // The Rijndael S-box (Substitution-box) is a non-linear byte substitution table used in AES.
@@ -885,6 +1017,44 @@ static void patch_code(uint8_t *rip, int bytes_consumed) {
     mprotect((void *)page_start, 4096 * 2, PROT_READ | PROT_EXEC);
 }
 
+static void fallback_to_old_handler(int sig, siginfo_t *si, void *ctx_void) {
+    struct sigaction previous = get_active_sa(sig);
+
+    if (previous.sa_handler == SIG_IGN) {
+        return;
+    }
+
+    if (previous.sa_handler == SIG_DFL) {
+        // Restore default handler disposition
+        real_sigaction(sig, &previous, NULL);
+
+        // Unblock the signal in thread signal mask to allow it to be delivered immediately
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, sig);
+        sigprocmask(SIG_UNBLOCK, &mask, NULL);
+
+        // Re-raise the exact signal on the faulting thread using tgkill
+        pid_t pid = getpid();
+        pid_t tid = (pid_t)syscall(SYS_gettid);
+        syscall(SYS_tgkill, pid, tid, sig);
+        _exit(128 + sig);
+    }
+
+    if (previous.sa_flags & SA_SIGINFO) {
+        if (previous.sa_sigaction) {
+            previous.sa_sigaction(sig, si, ctx_void);
+            return;
+        }
+    } else {
+        if (previous.sa_handler) {
+            previous.sa_handler(sig);
+            return;
+        }
+    }
+    _exit(132);
+}
+
 static void handler(int sig, siginfo_t *si, void *ctx_void) {
     ucontext_t *uc = (ucontext_t *)ctx_void;
     
@@ -897,28 +1067,25 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
         }
         
         // Fallback to original SIGTRAP handler
-        if (old_sa_trap.sa_flags & SA_SIGINFO) {
-            if (old_sa_trap.sa_sigaction) {
-                old_sa_trap.sa_sigaction(sig, si, ctx_void);
-                return;
-            }
-        } else {
-            if (old_sa_trap.sa_handler == SIG_DFL) {
-                sigaction(SIGTRAP, &old_sa_trap, NULL);
-                kill(getpid(), SIGTRAP);
-                return;
-            } else if (old_sa_trap.sa_handler == SIG_IGN) {
-                return;
-            } else if (old_sa_trap.sa_handler) {
-                old_sa_trap.sa_handler(sig);
-                return;
-            }
-        }
-        _exit(134);
+        fallback_to_old_handler(sig, si, ctx_void);
+        return;
     }
     
     if (!uc->uc_mcontext.fpregs) {
         _exit(133);
+    }
+
+    if (debug_emu) {
+        char msg[100];
+        int len = sprintf(msg, "[DEBUG_TRAP] SIGILL at RIP=%p: bytes=%02x %02x %02x %02x\n",
+                          rip, rip[0], rip[1], rip[2], rip[3]);
+        write(2, msg, len);
+    }
+
+    if (rip[0] == 0xC5 || rip[0] == 0xC4) {
+        if (emulate_avx_instruction(uc, rip, sig, si, ctx_void, debug_emu)) {
+            return;
+        }
     }
     
     /*
@@ -1213,24 +1380,7 @@ static void handler(int sig, siginfo_t *si, void *ctx_void) {
     }
     
     // Fallback: chain execution back to the original SIGILL handler if it is not one of our target instructions
-    if (old_sa.sa_flags & SA_SIGINFO) {
-        if (old_sa.sa_sigaction) {
-            old_sa.sa_sigaction(sig, si, ctx_void);
-            return;
-        }
-    } else {
-        if (old_sa.sa_handler == SIG_DFL) {
-            sigaction(SIGILL, &old_sa, NULL);
-            kill(getpid(), SIGILL);
-            return;
-        } else if (old_sa.sa_handler == SIG_IGN) {
-            return;
-        } else if (old_sa.sa_handler) {
-            old_sa.sa_handler(sig);
-            return;
-        }
-    }
-    _exit(132);
+    fallback_to_old_handler(sig, si, ctx_void);
 }
 
 static void check_help(void) {
@@ -1297,6 +1447,15 @@ static void check_help(void) {
  */
 __attribute__((constructor))
 static void init(void) {
+    // Resolve real_sigaction early
+    real_sigaction = (orig_sigaction_t)dlsym(RTLD_NEXT, "sigaction");
+    if (!real_sigaction) {
+        static const char message[] = "sigill-emulator: cannot resolve sigaction\n";
+        ssize_t rc = write(2, message, sizeof(message) - 1);
+        (void)rc;
+        _exit(127);
+    }
+
     check_help();
 
     // Check if emulation debug tracing is requested
@@ -1313,23 +1472,29 @@ static void init(void) {
         emu_mode_experimental = 1;
     }
     
-    // Register our SIGILL handler while saving the original handler (old_sa) to chain fallback calls
+    // Register our SIGILL handler while saving the original handler to sa_slots[0] and publishing it
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = handler;
     sigemptyset(&sa.sa_mask);
     
-    // SA_SIGINFO provides the ucontext pointer; SA_NODEFER prevents blocking nested SIGILL signals
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-    sigaction(SIGILL, &sa, &old_sa);
+    // SA_SIGINFO provides the ucontext pointer; SA_RESTART keeps delivery safe across JVM threads
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    real_sigaction(SIGILL, &sa, &sa_slots[0]);
+    active_sa = &sa_slots[0];
+    
+    // Spawn the reassert watchdog thread to ensure the JVM doesn't displace our SIGILL handler
+    pthread_create(&reassert_tid, NULL, reassert_sigill_handler, NULL);
+    pthread_detach(reassert_tid);
     
     if (emu_mode_experimental) {
-        // Register our SIGTRAP handler for lock-free atomic patching, preserving original handler
+        // Register our SIGTRAP handler, preserving original in sa_trap_slots[0]
         struct sigaction sa_trap;
         memset(&sa_trap, 0, sizeof(sa_trap));
         sa_trap.sa_sigaction = handler;
         sigemptyset(&sa_trap.sa_mask);
-        sa_trap.sa_flags = SA_SIGINFO | SA_NODEFER;
-        sigaction(SIGTRAP, &sa_trap, &old_sa_trap);
+        sa_trap.sa_flags = SA_SIGINFO | SA_RESTART;
+        real_sigaction(SIGTRAP, &sa_trap, &sa_trap_slots[0]);
+        active_sa_trap = &sa_trap_slots[0];
     }
 }
