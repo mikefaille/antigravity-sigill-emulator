@@ -58,11 +58,24 @@ Our emulator now integrates **SIMD Everywhere (SIMDe)** as its performance-criti
 If you are new to computer science or systems programming, follow these 3 simple steps to get a target binary (like `agy`) running on your older CPU:
 
 ### Step 1: Install Compiler Prerequisites
-You need a C compiler (`gcc`) and compilation utilities (`make`) to build the project:
-```bash
-sudo apt-get update
-sudo apt-get install build-essential gcc
-```
+You need a C compiler (`gcc`) and compilation utilities (`make`) to build the project. 
+
+*Note: The project uses **SIMD Everywhere (SIMDe)** under the hood. For your convenience, **SIMDe is already vendored inside this repository (`src/simde/`)**, so no separate installation is required to compile or run the toolkit!*
+
+However, if you are a developer looking to install SIMDe system-wide for other projects, you can do so easily:
+*   **Debian/Ubuntu**:
+    ```bash
+    sudo apt-get update
+    sudo apt-get install libsimde-dev build-essential gcc
+    ```
+*   **RedHat/Fedora**:
+    ```bash
+    sudo dnf install simde-devel gcc make
+    ```
+*   **Arch Linux**:
+    ```bash
+    sudo pacman -S simde gcc make
+    ```
 
 ### Step 2: Build and Install the Emulator
 Compile the compatibility library and install it to your user directory. This automatically builds three dynamic library variants:
