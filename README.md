@@ -48,6 +48,9 @@ Instead of translating the entire application, our emulator lets **99.9% of stan
 
 Only when the processor hits an unsupported instruction (e.g. `aesdec` or `pclmulqdq`) does the hardware raise an invalid opcode exception. Our `LD_PRELOAD` handler intercepts this specific signal, emulates the instruction in software, updates the register state, and returns. This localized trap-and-emulate cycle is extremely fast (~1.6 microseconds) and runs only when internal map hash calculations are performed, leaving the application completely responsive during normal operations!
 
+### Vectorization & Cryptographic Acceleration via SIMDe
+Our emulator now integrates **SIMD Everywhere (SIMDe)** as its performance-critical mathematical and cryptographic execution backend. SIMDe translates 256-bit AVX/AVX2 vector instructions and hardware `AES-NI` routines (such as `aesdec`, `aesenc`, and `aesimc`) directly to the legacy CPU's physical `SSE4.x` instruction pipeline. By leveraging compiler-assisted vector translation instead of slow scalar C lookup tables, emulated paths execute with maximum hardware efficiency.
+
 ---
 
 ## 🚀 Beginner Quickstart (3-Step Guide)
